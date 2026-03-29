@@ -1,0 +1,722 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Multi Tenant RAG</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --surface2: #242736;
+    --border: #2e3146; --accent: #6c63ff; --accent2: #4ecdc4;
+    --warn: #f7b731; --danger: #fc5c65; --success: #26de81;
+    --text: #e2e4f0; --muted: #7b7f9e; --radius: 8px;
+    --font: 'Inter', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--font); min-height: 100vh; }
+
+  /* Layout */
+  .app { display: flex; height: 100vh; overflow: hidden; }
+  .sidebar { width: 220px; background: var(--surface); border-right: 1px solid var(--border);
+             display: flex; flex-direction: column; padding: 0; flex-shrink: 0; }
+  .main { flex: 1; overflow-y: auto; padding: 28px 32px; }
+
+  /* Sidebar */
+  .logo { padding: 20px 20px 16px; border-bottom: 1px solid var(--border); }
+  .logo h1 { font-size: 18px; font-weight: 700; color: var(--accent); letter-spacing: -0.3px; }
+  .logo span { font-size: 11px; color: var(--muted); display: block; margin-top: 2px; }
+  .nav { padding: 12px 0; flex: 1; }
+  .nav-item { display: flex; align-items: center; gap: 10px; padding: 10px 20px;
+              cursor: pointer; font-size: 13px; color: var(--muted); border-left: 3px solid transparent;
+              transition: all 0.15s; }
+  .nav-item:hover { color: var(--text); background: var(--surface2); }
+  .nav-item.active { color: var(--accent); border-left-color: var(--accent); background: rgba(108,99,255,0.08); }
+  .nav-item svg { width: 15px; height: 15px; flex-shrink: 0; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success);
+                margin: 20px auto 8px; box-shadow: 0 0 6px var(--success); }
+  .status-label { font-size: 11px; color: var(--muted); text-align: center; padding-bottom: 16px; }
+
+  /* Pages */
+  .page { display: none; }
+  .page.active { display: block; }
+
+  /* Cards */
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+          padding: 20px; margin-bottom: 16px; }
+  .card-title { font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase;
+                letter-spacing: 0.6px; margin-bottom: 16px; }
+
+  /* Grid */
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
+  .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+
+  /* Stat tiles */
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+          padding: 18px 20px; }
+  .stat-val { font-size: 28px; font-weight: 700; color: var(--text); line-height: 1; }
+  .stat-label { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .stat-accent { color: var(--accent); }
+  .stat-success { color: var(--success); }
+  .stat-warn { color: var(--warn); }
+  .stat-danger { color: var(--danger); }
+
+  /* Forms */
+  .field { margin-bottom: 14px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; font-weight: 500; }
+  .field input, .field textarea, .field select {
+    width: 100%; background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 9px 12px; color: var(--text); font-size: 13px;
+    font-family: var(--font); outline: none; transition: border 0.15s; resize: vertical; }
+  .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }
+  .field textarea { min-height: 120px; }
+
+  /* Buttons */
+  .btn { display: inline-flex; align-items: center; gap: 7px; padding: 9px 18px;
+         border-radius: 6px; font-size: 13px; font-weight: 500; cursor: pointer;
+         border: none; transition: all 0.15s; font-family: var(--font); }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: #5a52d5; }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-danger { background: rgba(252,92,101,0.15); color: var(--danger); border: 1px solid rgba(252,92,101,0.3); }
+  .btn-danger:hover { background: rgba(252,92,101,0.25); }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+  /* Chat */
+  .chat-wrap { display: flex; flex-direction: column; height: calc(100vh - 160px); }
+  .chat-messages { flex: 1; overflow-y: auto; padding: 4px 0; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 82%; }
+  .msg.user { align-self: flex-end; }
+  .msg.assistant { align-self: flex-start; }
+  .msg-bubble { padding: 12px 16px; border-radius: 12px; font-size: 13.5px; line-height: 1.55; }
+  .msg.user .msg-bubble { background: var(--accent); color: #fff; border-bottom-right-radius: 3px; }
+  .msg.assistant .msg-bubble { background: var(--surface2); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+  .msg-meta { font-size: 11px; color: var(--muted); margin-top: 5px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .msg.user .msg-meta { justify-content: flex-end; }
+  .badge { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 11px; font-weight: 500; }
+  .badge-success { background: rgba(38,222,129,0.15); color: var(--success); }
+  .badge-warn { background: rgba(247,183,49,0.15); color: var(--warn); }
+  .badge-danger { background: rgba(252,92,101,0.15); color: var(--danger); }
+  .badge-info { background: rgba(108,99,255,0.15); color: var(--accent); }
+  .chat-input-row { display: flex; gap: 10px; padding-top: 16px; border-top: 1px solid var(--border); margin-top: 12px; }
+  .chat-input-row input { flex: 1; background: var(--surface2); border: 1px solid var(--border);
+                          border-radius: 8px; padding: 11px 14px; color: var(--text);
+                          font-size: 13px; outline: none; font-family: var(--font); }
+  .chat-input-row input:focus { border-color: var(--accent); }
+
+  /* Tables */
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; padding: 10px 14px; font-size: 11px; font-weight: 600;
+       color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px;
+       border-bottom: 1px solid var(--border); }
+  td { padding: 11px 14px; border-bottom: 1px solid rgba(46,49,70,0.5); vertical-align: top; }
+  tr:hover td { background: rgba(255,255,255,0.02); }
+
+  /* Metrics bar */
+  .metric-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+  .metric-name { font-size: 12px; color: var(--muted); width: 110px; flex-shrink: 0; }
+  .metric-bar-wrap { flex: 1; height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; }
+  .metric-bar { height: 100%; border-radius: 3px; transition: width 0.4s; }
+  .metric-val { font-size: 12px; font-weight: 600; width: 44px; text-align: right; }
+
+  /* Code / pre */
+  pre { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+        padding: 14px; font-size: 12px; overflow-x: auto; color: var(--accent2); }
+
+  /* Alerts */
+  .alert { padding: 12px 16px; border-radius: 6px; font-size: 13px; margin-bottom: 14px; }
+  .alert-success { background: rgba(38,222,129,0.1); border: 1px solid rgba(38,222,129,0.25); color: var(--success); }
+  .alert-error { background: rgba(252,92,101,0.1); border: 1px solid rgba(252,92,101,0.25); color: var(--danger); }
+  .alert-warn { background: rgba(247,183,49,0.1); border: 1px solid rgba(247,183,49,0.25); color: var(--warn); }
+  .alert-info { background: rgba(108,99,255,0.1); border: 1px solid rgba(108,99,255,0.25); color: var(--accent); }
+
+  /* Spinner */
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,0.2);
+             border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Misc */
+  .page-title { font-size: 20px; font-weight: 700; margin-bottom: 6px; }
+  .page-sub { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+  .flex { display: flex; }
+  .gap2 { gap: 8px; }
+  .items-center { align-items: center; }
+  .justify-between { justify-content: space-between; }
+  .mt2 { margin-top: 8px; }
+  .mt3 { margin-top: 12px; }
+  .hidden { display: none; }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 20px;
+          font-size: 11px; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); }
+  .truncate { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 240px; }
+</style>
+</head>
+<body>
+<div class="app">
+
+<!-- Sidebar -->
+<aside class="sidebar">
+  <div class="logo">
+    <h1>Multi Tenant RAG</h1>
+    <span>Multi-Agent Pipeline</span>
+  </div>
+  <nav class="nav">
+    <div class="nav-item active" data-page="dashboard" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      Dashboard
+    </div>
+    <div class="nav-item" data-page="clients" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Clients
+    </div>
+    <div class="nav-item" data-page="ingest" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      Ingest
+    </div>
+    <div class="nav-item" data-page="query" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      Query
+    </div>
+    <div class="nav-item" data-page="evaluation" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      Evaluation
+    </div>
+    <div class="nav-item" data-page="signals" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
+      Signals
+    </div>
+  </nav>
+  <div>
+    <div class="status-dot" id="statusDot"></div>
+    <div class="status-label" id="statusLabel">Checking...</div>
+  </div>
+</aside>
+
+<!-- Main content -->
+<main class="main">
+
+  <!-- DASHBOARD -->
+  <div class="page active" id="page-dashboard">
+    <div class="page-title">Dashboard</div>
+    <div class="page-sub">System overview and health</div>
+    <div class="grid4" id="dashStats">
+      <div class="stat"><div class="stat-val stat-accent" id="dClients">—</div><div class="stat-label">Clients</div></div>
+      <div class="stat"><div class="stat-val" id="dChunks">—</div><div class="stat-label">Total Chunks</div></div>
+      <div class="stat"><div class="stat-val stat-success" id="dStatus">—</div><div class="stat-label">API Status</div></div>
+      <div class="stat"><div class="stat-val stat-warn" id="dModel">—</div><div class="stat-label">Embed Model</div></div>
+    </div>
+    <div class="grid2 mt3">
+      <div class="card">
+        <div class="card-title">Registered Clients</div>
+        <div id="dashClientList"><div style="color:var(--muted);font-size:13px">Loading...</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Pipeline Architecture</div>
+        <pre style="font-size:11px;line-height:1.6">Query → Orchestrator
+  ↓
+  RetrievalAgent
+    Stage 1: Coarse (top-20)
+    Stage 2: MMR rerank (top-5)
+    Context Pruner (token budget)
+  ↓
+  LLM (Claude) + source prompt
+  ↓
+  ValidationAgent
+    Schema check
+    Source attribution
+    Confidence gate
+  ↓ [fail] CorrectionAgent
+    Query reformulation
+    Retry loop
+  ↓
+  EvaluationAgent
+    Signal logging
+    Drift snapshot</pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- CLIENTS -->
+  <div class="page" id="page-clients">
+    <div class="page-title">Clients</div>
+    <div class="page-sub">Each client has an isolated ChromaDB collection</div>
+    <div class="grid2">
+      <div class="card">
+        <div class="card-title">Register New Client</div>
+        <div class="field"><label>Client ID *</label><input id="cId" placeholder="e.g. acme_corp"/></div>
+        <div class="field"><label>Display Name</label><input id="cName" placeholder="ACME Corp"/></div>
+        <div class="field"><label>Notes</label><input id="cNotes" placeholder="Optional notes"/></div>
+        <div class="grid2">
+          <div class="field"><label>Coarse K (optional)</label><input id="cCoarseK" type="number" placeholder="20"/></div>
+          <div class="field"><label>Fine K (optional)</label><input id="cFineK" type="number" placeholder="5"/></div>
+        </div>
+        <button class="btn btn-primary" onclick="registerClient()"><span id="regBtnTxt">Register Client</span></button>
+        <div id="regAlert" class="mt2"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Registered Clients</div>
+        <div id="clientTable"><div style="color:var(--muted);font-size:13px">Loading...</div></div>
+        <button class="btn btn-secondary btn-sm mt3" onclick="loadClients()">↻ Refresh</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- INGEST -->
+  <div class="page" id="page-ingest">
+    <div class="page-title">Ingest Documents</div>
+    <div class="page-sub">Pipeline: clean → dedup → anomaly detect → chunk → embed → store</div>
+    <div class="grid2">
+      <div class="card">
+        <div class="card-title">Document Intake</div>
+        <div class="field"><label>Client *</label>
+          <select id="ingClient"><option value="">— Select client —</option></select>
+        </div>
+        <div class="field"><label>Source / filename</label><input id="ingSource" placeholder="e.g. handbook_v2.pdf"/></div>
+        <div class="field"><label>Document Text *</label>
+          <textarea id="ingText" placeholder="Paste document content here..."></textarea>
+        </div>
+        <div class="flex gap2">
+          <button class="btn btn-primary" onclick="ingestDoc()"><span id="ingBtnTxt">Ingest Document</span></button>
+          <button class="btn btn-secondary" onclick="loadSample()">Load Sample</button>
+        </div>
+        <div id="ingAlert" class="mt2"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Ingestion Result</div>
+        <div id="ingResult" style="color:var(--muted);font-size:13px">Results will appear here after ingestion.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- QUERY -->
+  <div class="page" id="page-query">
+    <div class="page-title">Query</div>
+    <div class="page-sub">Multi-agent RAG with hierarchical retrieval</div>
+    <div class="field flex gap2 items-center" style="margin-bottom:16px">
+      <label style="flex-shrink:0;margin:0;font-size:12px;color:var(--muted)">Client:</label>
+      <select id="qClient" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);font-size:13px;outline:none;flex:0 0 220px">
+        <option value="">— select —</option>
+      </select>
+    </div>
+    <div class="chat-wrap">
+      <div class="chat-messages" id="chatMessages">
+        <div class="msg assistant">
+          <div class="msg-bubble">Hi! Select a client and type your question. I'll retrieve context from their documents and answer using only grounded information.</div>
+        </div>
+      </div>
+      <div class="chat-input-row">
+        <input id="qInput" placeholder="Ask a question..." onkeydown="if(event.key==='Enter')sendQuery()"/>
+        <button class="btn btn-primary" onclick="sendQuery()" id="qBtn">Send</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- EVALUATION -->
+  <div class="page" id="page-evaluation">
+    <div class="page-title">Evaluation Pipeline</div>
+    <div class="page-sub">CI/CD pre-deploy gate: Recall@k, Precision@k, MRR, NDCG</div>
+    <div class="card">
+      <div class="card-title">Run Evaluation</div>
+      <div class="grid2">
+        <div>
+          <div class="field">
+            <label>Client ID</label>
+            <select id="evalClient"><option value="">— select client —</option></select>
+          </div>
+          <div class="field">
+            <label>Test Queries (one per line)</label>
+            <textarea id="evalQueries" placeholder="What is the refund policy?&#10;How do I reset my password?&#10;What are the system requirements?" style="min-height:100px"></textarea>
+          </div>
+          <div class="field">
+            <label>Rank cut-off k</label>
+            <input id="evalK" type="number" value="5" min="1" max="20"/>
+          </div>
+          <div class="alert alert-info" style="font-size:12px;margin-bottom:14px">
+            Note: Without ground-truth chunk IDs, evaluation runs retrieval and returns metrics based on what is retrieved. Provide relevant_chunk_ids in the API for full scoring.
+          </div>
+          <button class="btn btn-primary" onclick="runEval()" id="evalBtn">Run Evaluation</button>
+        </div>
+        <div id="evalResult" style="color:var(--muted);font-size:13px">Evaluation results will appear here.</div>
+      </div>
+    </div>
+    <div class="card" id="evalDriftCard" style="display:none">
+      <div class="card-title">Embedding Drift</div>
+      <div id="evalDrift"></div>
+    </div>
+  </div>
+
+  <!-- SIGNALS -->
+  <div class="page" id="page-signals">
+    <div class="page-title">Implicit Signals</div>
+    <div class="page-sub">Ground-truth from agent retries, failures, and task completions</div>
+    <div class="field flex gap2 items-center" style="margin-bottom:16px">
+      <label style="flex-shrink:0;margin:0;font-size:12px;color:var(--muted)">Client:</label>
+      <select id="sigClient" onchange="loadSignals()" style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:7px 12px;color:var(--text);font-size:13px;outline:none;flex:0 0 220px">
+        <option value="">— select —</option>
+      </select>
+    </div>
+    <div id="signalsContent" style="color:var(--muted);font-size:13px">Select a client to view signals.</div>
+  </div>
+
+</main>
+</div>
+
+<script>
+const API = '';
+
+// ── Navigation ────────────────────────────────────────────────────────────────
+function nav(el) {
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('page-' + el.dataset.page).classList.add('active');
+  if (el.dataset.page === 'clients') loadClients();
+  if (el.dataset.page === 'dashboard') loadDashboard();
+  if (el.dataset.page === 'signals') populateClientSelect('sigClient');
+}
+
+// ── API helper ────────────────────────────────────────────────────────────────
+async function api(path, method = 'GET', body = null) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const r = await fetch(API + path, opts);
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    throw new Error(err.detail || `HTTP ${r.status}`);
+  }
+  return r.json();
+}
+
+function showAlert(id, msg, type = 'info') {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.innerHTML = `<div class="alert alert-${type}">${msg}</div>`;
+  setTimeout(() => { if(el) el.innerHTML = ''; }, 6000);
+}
+
+// ── Health check ──────────────────────────────────────────────────────────────
+async function checkHealth() {
+  try {
+    await api('/health');
+    document.getElementById('statusDot').style.background = 'var(--success)';
+    document.getElementById('statusDot').style.boxShadow = '0 0 6px var(--success)';
+    document.getElementById('statusLabel').textContent = 'API online';
+  } catch {
+    document.getElementById('statusDot').style.background = 'var(--danger)';
+    document.getElementById('statusDot').style.boxShadow = '0 0 6px var(--danger)';
+    document.getElementById('statusLabel').textContent = 'API offline';
+  }
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────────
+async function loadDashboard() {
+  try {
+    await checkHealth();
+    document.getElementById('dStatus').textContent = 'Online';
+    document.getElementById('dModel').textContent = 'MiniLM-L6';
+    const clients = await api('/clients/');
+    document.getElementById('dClients').textContent = clients.length;
+    const total = clients.reduce((s, c) => s + (c.chunk_count || 0), 0);
+    document.getElementById('dChunks').textContent = total.toLocaleString();
+    const list = document.getElementById('dashClientList');
+    if (!clients.length) { list.innerHTML = '<div style="color:var(--muted);font-size:13px">No clients registered yet.</div>'; return; }
+    list.innerHTML = clients.map(c => `
+      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--border)">
+        <div>
+          <div style="font-size:13px;font-weight:500">${c.display_name}</div>
+          <div style="font-size:11px;color:var(--muted)">${c.client_id}</div>
+        </div>
+        <span class="pill">${c.chunk_count} chunks</span>
+      </div>`).join('');
+  } catch(e) { console.error(e); }
+}
+
+// ── Clients ───────────────────────────────────────────────────────────────────
+async function loadClients() {
+  try {
+    const clients = await api('/clients/');
+    const el = document.getElementById('clientTable');
+    if (!clients.length) { el.innerHTML = '<div style="color:var(--muted);font-size:13px">No clients yet.</div>'; return; }
+    el.innerHTML = `<div class="table-wrap"><table>
+      <thead><tr><th>ID</th><th>Name</th><th>Chunks</th><th>Created</th><th></th></tr></thead>
+      <tbody>${clients.map(c => `
+        <tr>
+          <td><code style="font-size:11px;color:var(--accent2)">${c.client_id}</code></td>
+          <td>${c.display_name}</td>
+          <td>${c.chunk_count}</td>
+          <td style="color:var(--muted);font-size:11px">${c.created_at.slice(0,10)}</td>
+          <td><button class="btn btn-danger btn-sm" onclick="deleteClient('${c.client_id}')">✕</button></td>
+        </tr>`).join('')}
+      </tbody></table></div>`;
+    populateAllClientSelects(clients);
+  } catch(e) { showAlert('regAlert', e.message, 'error'); }
+}
+
+async function registerClient() {
+  const id = document.getElementById('cId').value.trim();
+  if (!id) { showAlert('regAlert', 'Client ID is required.', 'error'); return; }
+  const btn = document.getElementById('regBtnTxt');
+  btn.innerHTML = '<span class="spinner"></span>';
+  try {
+    await api('/clients/', 'POST', {
+      client_id: id,
+      display_name: document.getElementById('cName').value.trim() || id,
+      notes: document.getElementById('cNotes').value.trim(),
+      coarse_k: document.getElementById('cCoarseK').value ? parseInt(document.getElementById('cCoarseK').value) : null,
+      fine_k: document.getElementById('cFineK').value ? parseInt(document.getElementById('cFineK').value) : null,
+    });
+    showAlert('regAlert', `Client <strong>${id}</strong> registered.`, 'success');
+    ['cId','cName','cNotes','cCoarseK','cFineK'].forEach(f => document.getElementById(f).value = '');
+    loadClients();
+  } catch(e) { showAlert('regAlert', e.message, 'error'); }
+  btn.textContent = 'Register Client';
+}
+
+async function deleteClient(id) {
+  if (!confirm(`Delete client "${id}"? This does NOT delete their vectors.`)) return;
+  await api(`/clients/${id}`, 'DELETE');
+  loadClients();
+}
+
+function populateAllClientSelects(clients) {
+  ['ingClient','qClient','evalClient','sigClient'].forEach(selId => {
+    const sel = document.getElementById(selId);
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">— select client —</option>' +
+      clients.map(c => `<option value="${c.client_id}" ${c.client_id===cur?'selected':''}>${c.display_name} (${c.client_id})</option>`).join('');
+  });
+}
+
+async function populateClientSelect(selId) {
+  try {
+    const clients = await api('/clients/');
+    populateAllClientSelects(clients);
+  } catch {}
+}
+
+// ── Ingest ────────────────────────────────────────────────────────────────────
+function loadSample() {
+  document.getElementById('ingText').value = `Introduction to RAG Systems
+
+Retrieval-Augmented Generation (RAG) is a technique that combines information retrieval with language model generation. Instead of relying solely on the knowledge encoded in a language model's parameters, RAG systems retrieve relevant documents from an external knowledge base and provide them as context to the model.
+
+Key Components of a RAG Pipeline
+
+The ingestion phase processes documents through several steps: cleaning removes noise and formatting artifacts, chunking splits documents into semantically meaningful pieces, and embedding converts text into vector representations for similarity search.
+
+During retrieval, the system converts a user query into an embedding and searches the vector database for similar chunks. Hierarchical retrieval improves precision by first doing a broad coarse search, then reranking using Maximal Marginal Relevance (MMR) to balance relevance and diversity.
+
+Challenges and Solutions
+
+One major challenge is embedding drift: as new documents are added over time, the statistical distribution of embeddings can shift, degrading retrieval quality. The solution is to monitor centroid similarity over time and trigger re-indexing when drift exceeds a threshold.
+
+Another challenge is hallucination, where the language model generates plausible but incorrect information. Mitigation strategies include tight context windows, source attribution requirements, structured output validation, and confidence scoring.
+
+Evaluation Metrics
+
+Standard retrieval evaluation uses Recall@k (fraction of relevant docs retrieved in top k), Precision@k (fraction of retrieved docs that are relevant), Mean Reciprocal Rank (MRR), and Normalized Discounted Cumulative Gain (NDCG). Outcome-based metrics like task completion rate provide complementary signals about end-to-end quality.
+
+Multi-Client Architecture
+
+Production RAG systems often serve multiple clients with different data. The recommended approach is to standardise the infrastructure (chunking, embedding, evaluation pipelines) while customising the retrieval configuration (k values, thresholds) and data handling per client. Vector databases like ChromaDB support isolated collections per client.`;
+  document.getElementById('ingSource').value = 'rag_overview.txt';
+}
+
+async function ingestDoc() {
+  const client = document.getElementById('ingClient').value;
+  const text = document.getElementById('ingText').value.trim();
+  if (!client) { showAlert('ingAlert', 'Select a client first.', 'error'); return; }
+  if (!text) { showAlert('ingAlert', 'Document text is required.', 'error'); return; }
+  const btn = document.getElementById('ingBtnTxt');
+  btn.innerHTML = '<span class="spinner"></span> Ingesting...';
+  try {
+    const res = await api('/ingest/', 'POST', {
+      client_id: client,
+      text,
+      source: document.getElementById('ingSource').value || 'manual',
+    });
+    document.getElementById('ingResult').innerHTML = `
+      <div class="alert alert-success" style="margin-bottom:12px">Document ingested successfully.</div>
+      <div class="grid2" style="gap:10px">
+        <div class="stat"><div class="stat-val">${res.total_chunks}</div><div class="stat-label">Total Chunks</div></div>
+        <div class="stat"><div class="stat-val stat-success">${res.stored_chunks}</div><div class="stat-label">Stored</div></div>
+        <div class="stat"><div class="stat-val stat-warn">${res.duplicate_chunks}</div><div class="stat-label">Duplicates</div></div>
+        <div class="stat"><div class="stat-val stat-danger">${res.anomalous_chunks}</div><div class="stat-label">Anomalous</div></div>
+      </div>
+      <div style="margin-top:12px;font-size:12px;color:var(--muted)">Doc ID: <code style="color:var(--accent2)">${res.doc_id}</code></div>
+      ${res.errors.length ? `<div class="alert alert-warn" style="margin-top:10px;font-size:12px">${res.errors.join('<br>')}</div>` : ''}`;
+    loadDashboard();
+  } catch(e) { showAlert('ingAlert', e.message, 'error'); }
+  btn.textContent = 'Ingest Document';
+}
+
+// ── Query ─────────────────────────────────────────────────────────────────────
+async function sendQuery() {
+  const client = document.getElementById('qClient').value;
+  const input = document.getElementById('qInput');
+  const q = input.value.trim();
+  if (!client) { alert('Select a client first.'); return; }
+  if (!q) return;
+
+  const container = document.getElementById('chatMessages');
+  container.innerHTML += `<div class="msg user"><div class="msg-bubble">${escHtml(q)}</div></div>`;
+  input.value = '';
+
+  const loadingId = 'loading_' + Date.now();
+  container.innerHTML += `<div class="msg assistant" id="${loadingId}">
+    <div class="msg-bubble" style="color:var(--muted)"><span class="spinner"></span> Retrieving and reasoning...</div>
+  </div>`;
+  container.scrollTop = container.scrollHeight;
+
+  document.getElementById('qBtn').disabled = true;
+
+  try {
+    const res = await api('/query/', 'POST', { client_id: client, query: q });
+    const confClass = res.confidence >= 0.7 ? 'badge-success' : res.confidence >= 0.4 ? 'badge-warn' : 'badge-danger';
+    const srcHtml = res.sources.length
+      ? res.sources.map(s => `<span class="pill" style="font-size:10px">${escHtml(s)}</span>`).join(' ')
+      : '<span style="color:var(--muted)">none cited</span>';
+    document.getElementById(loadingId).outerHTML = `
+      <div class="msg assistant">
+        <div class="msg-bubble">${escHtml(res.answer)}</div>
+        <div class="msg-meta">
+          <span class="badge ${confClass}">confidence: ${(res.confidence*100).toFixed(0)}%</span>
+          <span class="badge badge-info">${res.chunks_used} chunks</span>
+          ${res.retry_count > 0 ? `<span class="badge badge-warn">${res.retry_count} retries</span>` : ''}
+          <span style="color:var(--muted);font-size:10px">run: ${res.run_id}</span>
+        </div>
+        <div style="margin-top:6px;font-size:11px;color:var(--muted)">Sources: ${srcHtml}</div>
+      </div>`;
+  } catch(e) {
+    document.getElementById(loadingId).outerHTML = `
+      <div class="msg assistant">
+        <div class="msg-bubble" style="color:var(--danger)">Error: ${escHtml(e.message)}</div>
+      </div>`;
+  }
+  document.getElementById('qBtn').disabled = false;
+  container.scrollTop = container.scrollHeight;
+}
+
+// ── Evaluation ────────────────────────────────────────────────────────────────
+async function runEval() {
+  const client = document.getElementById('evalClient').value;
+  if (!client) { alert('Select a client first.'); return; }
+  const rawQueries = document.getElementById('evalQueries').value.trim().split('\n').filter(Boolean);
+  if (!rawQueries.length) { alert('Add at least one test query.'); return; }
+  const k = parseInt(document.getElementById('evalK').value) || 5;
+
+  const btn = document.getElementById('evalBtn');
+  btn.innerHTML = '<span class="spinner"></span> Running...';
+  btn.disabled = true;
+
+  const client_queries = { [client]: rawQueries.map(q => ({ query: q, relevant_chunk_ids: [] })) };
+  try {
+    const report = await api('/eval/run', 'POST', { client_queries, k });
+    const r = report.client_results[0];
+    const passColor = r.passed ? 'var(--success)' : 'var(--danger)';
+    const metricBars = Object.entries(r.metrics).map(([name, val]) => {
+      const pct = Math.round(val * 100);
+      const color = val >= 0.7 ? 'var(--success)' : val >= 0.4 ? 'var(--warn)' : 'var(--danger)';
+      return `<div class="metric-row">
+        <span class="metric-name">${name}</span>
+        <div class="metric-bar-wrap"><div class="metric-bar" style="width:${pct}%;background:${color}"></div></div>
+        <span class="metric-val" style="color:${color}">${val.toFixed(3)}</span>
+      </div>`;
+    }).join('');
+
+    document.getElementById('evalResult').innerHTML = `
+      <div style="font-size:15px;font-weight:700;color:${passColor};margin-bottom:14px">
+        ${r.passed ? '✓ PASSED' : '✗ FAILED'}
+      </div>
+      ${r.failure_reasons.length ? `<div class="alert alert-error" style="margin-bottom:12px;font-size:12px">${r.failure_reasons.join('<br>')}</div>` : ''}
+      <div style="margin-bottom:8px;font-size:12px;color:var(--muted)">Metrics (k=${k}, ${r.num_queries} queries)</div>
+      ${metricBars}
+      <div style="margin-top:12px;font-size:12px;color:var(--muted)">
+        Drift score: <strong style="color:${r.drift_score > 0.15 ? 'var(--warn)' : 'var(--success)'}">${r.drift_score.toFixed(4)}</strong>
+        ${r.drift_score > 0.15 ? '<span class="badge badge-warn" style="margin-left:6px">re-index recommended</span>' : ''}
+      </div>`;
+
+    // Drift card
+    const driftReport = await api(`/eval/drift/${client}`);
+    document.getElementById('evalDriftCard').style.display = 'block';
+    document.getElementById('evalDrift').innerHTML = `
+      <div class="grid3" style="margin-bottom:14px">
+        <div class="stat"><div class="stat-val">${driftReport.snapshot_count}</div><div class="stat-label">Snapshots</div></div>
+        <div class="stat"><div class="stat-val ${driftReport.needs_reindex ? 'stat-warn' : 'stat-success'}">${driftReport.drift_score.toFixed(4)}</div><div class="stat-label">Drift Score</div></div>
+        <div class="stat"><div class="stat-val">${driftReport.threshold}</div><div class="stat-label">Threshold</div></div>
+      </div>
+      ${driftReport.needs_reindex ? '<div class="alert alert-warn">Re-indexing recommended. Drift exceeds threshold.</div>' : '<div class="alert alert-success">Embeddings stable. No re-index needed.</div>'}`;
+  } catch(e) {
+    document.getElementById('evalResult').innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+  btn.textContent = 'Run Evaluation';
+  btn.disabled = false;
+}
+
+// ── Signals ───────────────────────────────────────────────────────────────────
+async function loadSignals() {
+  const client = document.getElementById('sigClient').value;
+  const container = document.getElementById('signalsContent');
+  if (!client) { container.innerHTML = '<div style="color:var(--muted);font-size:13px">Select a client to view signals.</div>'; return; }
+  container.innerHTML = '<div style="color:var(--muted);font-size:13px"><span class="spinner"></span> Loading...</div>';
+  try {
+    const data = await api(`/eval/signals/${client}`);
+    const typeColor = t => ({
+      task_success: 'badge-success', task_failure: 'badge-danger',
+      validation_failure: 'badge-danger', correction_triggered: 'badge-warn',
+      agent_retry: 'badge-warn', hallucination_detected: 'badge-danger',
+      low_confidence: 'badge-warn',
+    }[t] || 'badge-info');
+
+    container.innerHTML = `
+      <div class="grid4" style="margin-bottom:16px">
+        <div class="stat"><div class="stat-val">${data.total_signals}</div><div class="stat-label">Total Signals</div></div>
+        <div class="stat"><div class="stat-val stat-success">${(data.task_completion_rate*100).toFixed(1)}%</div><div class="stat-label">Task Completion</div></div>
+        <div class="stat"><div class="stat-val stat-warn">${(data.retry_rate*100).toFixed(1)}%</div><div class="stat-label">Retry Rate</div></div>
+        <div class="stat"><div class="stat-val stat-danger">${(data.failure_rate*100).toFixed(1)}%</div><div class="stat-label">Failure Rate</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Signal Breakdown</div>
+        ${Object.entries(data.counts).map(([type, count]) => `
+          <div class="metric-row">
+            <span class="metric-name" style="width:200px"><span class="badge ${typeColor(type)}">${type}</span></span>
+            <div class="metric-bar-wrap"><div class="metric-bar" style="width:${Math.min(100,(count/Math.max(data.total_signals,1))*100)}%;background:var(--accent)"></div></div>
+            <span class="metric-val">${count}</span>
+          </div>`).join('')}
+      </div>
+      <div class="card">
+        <div class="card-title">Recent Signals</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Type</th><th>Query</th><th>Time</th></tr></thead>
+          <tbody>${data.recent_signals.map(s => `
+            <tr>
+              <td><span class="badge ${typeColor(s.type)}">${s.type}</span></td>
+              <td class="truncate">${escHtml(s.query)}</td>
+              <td style="color:var(--muted);font-size:11px;white-space:nowrap">${s.timestamp.slice(0,19).replace('T',' ')}</td>
+            </tr>`).join('')}
+          </tbody></table></div>
+      </div>`;
+  } catch(e) { container.innerHTML = `<div class="alert alert-error">${e.message}</div>`; }
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+checkHealth();
+loadDashboard();
+// Populate client selects on page load
+(async () => {
+  try {
+    const clients = await api('/clients/');
+    populateAllClientSelects(clients);
+  } catch {}
+})();
+</script>
+</body>
+</html>

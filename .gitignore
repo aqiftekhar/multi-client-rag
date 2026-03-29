@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual env
+venv/
+.env
+
+# Environment variables
+.env.*
+!.env.example
+
+# Data (VERY IMPORTANT for RAG)
+data/
+chroma_data/
+*.db
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test cache
+.pytest_cache/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Docker
+*.pid
+
+# Misc
+*.sqlite3
