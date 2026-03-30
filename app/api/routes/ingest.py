@@ -6,6 +6,8 @@ from app.api.models import IngestRequest, IngestResponse
 from app.clients import manager
 from app.db.chroma_client import delete_collection
 from app.ingestion.intake import ingest_document
+import logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
 
@@ -13,10 +15,13 @@ _MAX_PDF_MB = 50
 
 
 def _extract_pdf_text(pdf_bytes: bytes, filename: str) -> str:
-    """Extract all text from a PDF using PyMuPDF.
+    """Extract text, tables, and images from a PDF.
 
-    Handles digital PDFs with selectable text.
-    Each page is separated clearly so the chunker can work with it.
+    Per page strategy:
+      1. Extract direct text (fast, accurate for digital PDFs)
+      2. Extract tables → convert to readable text format
+      3. Extract embedded images → OCR each one
+      4. If page has no text at all (scanned) → OCR the whole rendered page
     """
     try:
         import fitz  # PyMuPDF
@@ -27,30 +32,129 @@ def _extract_pdf_text(pdf_bytes: bytes, filename: str) -> str:
         )
 
     try:
+        import pytesseract
+        from PIL import Image
+        import io
+        ocr_available = True
+    except ImportError:
+        ocr_available = False
+        logger.warning("pytesseract/Pillow not installed — image OCR disabled.")
+
+    try:
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Could not open PDF: {exc}")
 
-    pages_text = []
-    for i, page in enumerate(doc, 1):
-        text = page.get_text("text").strip()
-        if text:
-            pages_text.append(f"[Page {i}]\n{text}")
+    logger.info("Extracting PDF '%s' — %d pages", filename, len(doc))
+
+    all_pages: list[str] = []
+    MIN_TEXT_CHARS = 30
+    MIN_IMAGE_SIZE = 100  # skip tiny images (icons, bullets)
+
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        page_label = f"[Page {page_num + 1}]"
+        page_parts: list[str] = []
+
+        # ── 1. Direct text extraction ─────────────────────────────────────────
+        direct_text = page.get_text("text").strip()
+        if direct_text:
+            page_parts.append(direct_text)
+
+        # ── 2. Table extraction ───────────────────────────────────────────────
+        # PyMuPDF 1.23+ has find_tables()
+        try:
+            tables = page.find_tables()
+            for table_index, table in enumerate(tables, 1):
+                rows = table.extract()
+                if not rows:
+                    continue
+
+                # Convert table rows to readable plain text
+                table_lines = [f"[Table {table_index}]"]
+                for row in rows:
+                    # Clean None values and strip whitespace
+                    cleaned = [str(cell).strip() if cell is not None else "" for cell in row]
+                    table_lines.append(" | ".join(cleaned))
+
+                table_text = "\n".join(table_lines)
+                # Only add if table has actual content
+                if any(cell for row in rows for cell in row if cell):
+                    page_parts.append(table_text)
+                    logger.debug(
+                        "Page %d: extracted table %d (%d rows)",
+                        page_num + 1, table_index, len(rows)
+                    )
+        except AttributeError:
+            # find_tables() not available in older PyMuPDF versions
+            logger.debug("Table extraction not available — upgrade pymupdf if needed.")
+        except Exception as exc:
+            logger.warning("Table extraction failed on page %d: %s", page_num + 1, exc)
+
+        # ── 3. Image extraction + OCR ─────────────────────────────────────────
+        if ocr_available:
+            image_list = page.get_images(full=True)
+            for img_ref in image_list:
+                xref = img_ref[0]
+                try:
+                    base_image = doc.extract_image(xref)
+                    image_bytes = base_image["image"]
+                    pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+                    w, h = pil_image.size
+
+                    # Skip tiny images — they're likely icons or decorations
+                    if w < MIN_IMAGE_SIZE or h < MIN_IMAGE_SIZE:
+                        continue
+
+                    ocr_text = pytesseract.image_to_string(pil_image, lang="eng").strip()
+                    if ocr_text and len(ocr_text) > 20:
+                        page_parts.append(f"[Image Text]\n{ocr_text}")
+                        logger.debug(
+                            "Page %d: OCR'd image %dx%d → %d chars",
+                            page_num + 1, w, h, len(ocr_text)
+                        )
+                except Exception as exc:
+                    logger.warning("Image OCR failed on page %d: %s", page_num + 1, exc)
+
+        # ── 4. Scanned page fallback — OCR the entire rendered page ──────────
+        # Triggered when: no direct text AND no embedded images extracted text
+        if ocr_available and len(direct_text) < MIN_TEXT_CHARS and not page.get_images():
+            try:
+                # Render page at 2x zoom for better OCR accuracy (~144 DPI)
+                mat = fitz.Matrix(2.0, 2.0)
+                pix = page.get_pixmap(matrix=mat, alpha=False)
+                pil_page = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
+                ocr_text = pytesseract.image_to_string(pil_page, lang="eng").strip()
+                if ocr_text:
+                    page_parts.append(f"[Scanned Page OCR]\n{ocr_text}")
+                    logger.info("Page %d: full-page OCR returned %d chars", page_num + 1, len(ocr_text))
+                else:
+                    logger.warning("Page %d: OCR returned nothing — image may be too low quality", page_num + 1)
+            except Exception as exc:
+                logger.warning("Full-page OCR failed on page %d: %s", page_num + 1, exc)
+
+        # ── Combine page parts ────────────────────────────────────────────────
+        if page_parts:
+            all_pages.append(f"{page_label}\n" + "\n\n".join(page_parts))
 
     doc.close()
 
-    full_text = "\n\n".join(pages_text)
+    full_text = "\n\n".join(all_pages)
 
     if not full_text.strip():
         raise HTTPException(
             status_code=422,
             detail=(
-                "No text could be extracted from this PDF. "
-                "It may be a scanned image-only PDF. "
-                "Please convert it to a text-based PDF first."
+                "No content could be extracted from this PDF. "
+                "It may be corrupt, password-protected, or contain "
+                "only non-readable content."
             ),
         )
 
+    logger.info(
+        "PDF extraction complete: %d pages, %d total chars",
+        len(all_pages), len(full_text)
+    )
     return full_text
 
 

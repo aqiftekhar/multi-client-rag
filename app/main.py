@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Embedding warmup failed (non-fatal): %s", exc)
     yield
-    logger.info("SkyHi RAG shutting down.")
+    logger.info("Multi Tenant RAG shutting down.")
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
