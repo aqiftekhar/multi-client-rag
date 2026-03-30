@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from app.ingestion.cleaner import clean
 from app.ingestion.deduplicator import deduplicate
 from app.ingestion.anomaly_detector import filter_anomalies
-from app.rag.chunker import chunk_text, Chunk
+from app.rag.chunker import chunk_text, build_context_header, Chunk
 from app.rag.embedder import embed_chunks
 from app.db.chroma_client import get_or_create_collection
 
@@ -90,18 +90,32 @@ def ingest_document(
             anomalous_chunks=anomalous_count,
         )
 
-    # 5. Embed
+    # 5. Build contextual headers — done after dedup so index stays meaningful
+    for chunk in unique_chunks:
+        chunk.context_header = build_context_header(
+            source=source,
+            doc_id=doc_id,
+            chunk_index=chunk.chunk_index,
+            total_chunks=len(chunks),
+        )
+
+    # 6. Embed RAW text only — header must NOT be embedded.
+    #    Embedding the header would dilute the semantic signal.
     embeddings = embed_chunks([c.text for c in unique_chunks])
 
-    # 6. Store in ChromaDB
+    # 7. Store in ChromaDB
+    #    document  = header + text  → what the LLM receives
+    #    embedding = raw text       → what retrieval uses
     collection = get_or_create_collection(client_id)
     now = datetime.now(timezone.utc).isoformat()
 
     ids, docs, metadatas, vecs = [], [], [], []
     for chunk, embedding in zip(unique_chunks, embeddings):
         chunk_hash = hashlib.sha256(chunk.text.encode()).hexdigest()[:16]
+        stored_text = f"{chunk.context_header}\n\n{chunk.text}"
+
         ids.append(chunk.chunk_id)
-        docs.append(chunk.text)
+        docs.append(stored_text)
         metadatas.append(
             {
                 "doc_id": doc_id,
@@ -110,6 +124,7 @@ def ingest_document(
                 "chunk_index": chunk.chunk_index,
                 "chunk_hash": chunk_hash,
                 "ingested_at": now,
+                "context_header": chunk.context_header,
                 **extra_metadata,
             }
         )

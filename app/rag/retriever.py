@@ -1,15 +1,37 @@
-"""Hierarchical retrieval: coarse semantic search → MMR fine reranking."""
+"""Hierarchical retrieval: coarse semantic search → cross-encoder reranking.
+
+Stage 1 — Coarse:  broad dense vector search, top coarse_k candidates.
+Stage 2 — Rerank:  cross-encoder scores every (query, chunk) pair together
+                   and selects top fine_k by true relevance.
+
+Why cross-encoder over MMR:
+  MMR optimises for diversity using cosine similarity.
+  The cross-encoder reads query + chunk together in one pass —
+  it understands relevance the way a human reader would.
+"""
 
 import logging
 from dataclasses import dataclass
+from functools import lru_cache
 
-import numpy as np
+from sentence_transformers import CrossEncoder
 
 from app.config import get_settings
 from app.db.chroma_client import get_or_create_collection
 from app.rag.embedder import embed_query
 
 logger = logging.getLogger(__name__)
+
+_CROSS_ENCODER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+
+@lru_cache()
+def _get_cross_encoder() -> CrossEncoder:
+    """Load and cache the cross-encoder (loaded once on first query)."""
+    logger.info("Loading cross-encoder '%s'...", _CROSS_ENCODER_MODEL)
+    model = CrossEncoder(_CROSS_ENCODER_MODEL, max_length=512)
+    logger.info("Cross-encoder loaded.")
+    return model
 
 
 @dataclass
@@ -21,55 +43,52 @@ class RetrievedChunk:
     text: str
     source: str
     chunk_index: int
-    score: float          # cosine similarity (0–1)
+    score: float          # cross-encoder score after reranking
     metadata: dict
 
 
-def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    na, nb = np.linalg.norm(a), np.linalg.norm(b)
-    if na == 0 or nb == 0:
-        return 0.0
-    return float(np.dot(a, b) / (na * nb))
-
-
-def _mmr(
-    query_vec: list[float],
+def _rerank(
+    query: str,
     candidates: list[RetrievedChunk],
-    candidate_embeddings: list[list[float]],
-    k: int,
-    lambda_: float = 0.5,
+    top_k: int,
 ) -> list[RetrievedChunk]:
-    """Maximal Marginal Relevance reranking.
+    """Rerank candidates using the cross-encoder.
 
-    Balances relevance to the query and diversity among selected chunks.
-    λ=1 → pure relevance, λ=0 → pure diversity.
+    Scores every (query, raw_chunk_text) pair. Returns top_k
+    sorted by score descending.
     """
     if not candidates:
         return []
 
-    selected_indices: list[int] = []
-    remaining = list(range(len(candidates)))
+    cross_encoder = _get_cross_encoder()
 
-    while len(selected_indices) < k and remaining:
-        mmr_scores: list[tuple[int, float]] = []
-        for idx in remaining:
-            relevance = _cosine_similarity(query_vec, candidate_embeddings[idx])
-            if not selected_indices:
-                redundancy = 0.0
-            else:
-                redundancy = max(
-                    _cosine_similarity(candidate_embeddings[idx], candidate_embeddings[sel])
-                    for sel in selected_indices
-                )
-            mmr_score = lambda_ * relevance - (1 - lambda_) * redundancy
-            mmr_scores.append((idx, mmr_score))
+    # Use raw_text from metadata where available so the header
+    # text doesn't interfere with relevance scoring
+    pairs = [
+        (query, chunk.metadata.get("raw_text", chunk.text))
+        for chunk in candidates
+    ]
 
-        best_idx, _ = max(mmr_scores, key=lambda x: x[1])
-        selected_indices.append(best_idx)
-        remaining.remove(best_idx)
+    scores = cross_encoder.predict(pairs)
 
-    return [candidates[i] for i in selected_indices]
+    scored = sorted(
+        zip(candidates, scores),
+        key=lambda x: float(x[1]),
+        reverse=True,
+    )
+
+    result = []
+    for chunk, score in scored[:min(top_k, len(scored))]:
+        chunk.score = float(score)
+        result.append(chunk)
+
+    logger.debug(
+        "Cross-encoder: %d → %d chunks. Top score: %.4f",
+        len(candidates),
+        len(result),
+        result[0].score if result else 0.0,
+    )
+    return result
 
 
 def retrieve(
@@ -78,10 +97,10 @@ def retrieve(
     coarse_k: int | None = None,
     fine_k: int | None = None,
 ) -> list[RetrievedChunk]:
-    """Two-stage hierarchical retrieval for *query* against *client_id*'s corpus.
+    """Two-stage retrieval for query against client_id's corpus.
 
-    Stage 1 — Coarse: broad semantic search returning top *coarse_k* candidates.
-    Stage 2 — Fine: MMR reranking to top *fine_k* diverse, relevant chunks.
+    Stage 1 — Coarse dense retrieval (top coarse_k by embedding similarity).
+    Stage 2 — Cross-encoder reranking (top fine_k by true relevance).
     """
     cfg = get_settings()
     coarse_k = coarse_k or cfg.coarse_k
@@ -97,24 +116,20 @@ def retrieve(
 
     actual_k = min(coarse_k, n_docs)
 
-    # Stage 1: Coarse retrieval
+    # Stage 1: Coarse dense retrieval
     results = collection.query(
         query_embeddings=[query_vec],
         n_results=actual_k,
-        include=["documents", "metadatas", "distances", "embeddings"],
+        include=["documents", "metadatas", "distances"],
     )
 
     ids = results["ids"][0]
     documents = results["documents"][0]
     metadatas = results["metadatas"][0]
     distances = results["distances"][0]
-    raw_embeddings = results["embeddings"][0]
 
     candidates: list[RetrievedChunk] = []
-    candidate_vecs: list[list[float]] = []
-
-    for cid, doc, meta, dist, emb in zip(ids, documents, metadatas, distances, raw_embeddings):
-        similarity = 1.0 - dist  # ChromaDB cosine distance → similarity
+    for cid, doc, meta, dist in zip(ids, documents, metadatas, distances):
         candidates.append(
             RetrievedChunk(
                 chunk_id=cid,
@@ -122,22 +137,15 @@ def retrieve(
                 text=doc,
                 source=meta.get("source", ""),
                 chunk_index=int(meta.get("chunk_index", 0)),
-                score=similarity,
+                score=1.0 - dist,
                 metadata=meta,
             )
         )
-        candidate_vecs.append(list(emb))
 
     logger.debug(
-        "Stage-1 retrieved %d candidates for query '%s...' (client=%s).",
-        len(candidates),
-        query[:40],
-        client_id,
+        "Stage-1: %d candidates for '%.40s' (client=%s)",
+        len(candidates), query, client_id,
     )
 
-    # Stage 2: MMR fine reranking
-    final_k = min(fine_k, len(candidates))
-    reranked = _mmr(query_vec, candidates, candidate_vecs, k=final_k)
-
-    logger.debug("Stage-2 MMR selected %d chunks.", len(reranked))
-    return reranked
+    # Stage 2: Cross-encoder reranking
+    return _rerank(query, candidates, top_k=fine_k)

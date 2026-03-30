@@ -27,6 +27,28 @@ class Chunk:
     text: str
     chunk_index: int
     token_count: int
+    context_header: str = ""   # prepended when stored, NOT when embedded
+
+
+def build_context_header(
+    source: str,
+    doc_id: str,
+    chunk_index: int,
+    total_chunks: int,
+) -> str:
+    """Build a context header for a chunk.
+
+    Stored with every chunk so the LLM always knows which document
+    and section a chunk came from — even retrieved out of order.
+    NOT included in the embedding so retrieval stays content-based.
+
+    Example: Source: handbook.pdf | Document ID: abc12345 | Section: 2 of 8
+    """
+    return " | ".join([
+        f"Source: {source}",
+        f"Document ID: {doc_id[:8]}",
+        f"Section: {chunk_index + 1} of {total_chunks}",
+    ])
 
 
 def _split_sentences(text: str) -> list[str]:
