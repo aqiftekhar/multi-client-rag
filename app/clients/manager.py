@@ -1,22 +1,29 @@
-"""Client registry — manages per-client configuration and state."""
+"""Client registry — manages per-client configuration and state.
 
+Persists to data/clients.json so clients survive app restarts.
+ChromaDB vectors are already persistent via Docker volume.
+"""
+
+import json
 import logging
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
 from app.db.chroma_client import collection_count, delete_collection
 
 logger = logging.getLogger(__name__)
 
+_REGISTRY_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "data", "clients.json")
+_registry: dict[str, "ClientConfig"] = {}
+
 
 @dataclass
 class ClientConfig:
-    """Per-client configuration overrides."""
-
     client_id: str
     display_name: str
-    coarse_k: int | None = None       # override global default
-    fine_k: int | None = None         # override global default
+    coarse_k: int | None = None
+    fine_k: int | None = None
     max_context_tokens: int | None = None
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
@@ -24,9 +31,43 @@ class ClientConfig:
     notes: str = ""
 
 
-# In-memory registry (production: replace with a database)
-_registry: dict[str, ClientConfig] = {}
+# ── Persistence ───────────────────────────────────────────────────────────────
 
+def _save() -> None:
+    """Write the current registry to disk as JSON."""
+    try:
+        os.makedirs(os.path.dirname(_REGISTRY_FILE), exist_ok=True)
+        with open(_REGISTRY_FILE, "w") as f:
+            json.dump(
+                {cid: asdict(cfg) for cid, cfg in _registry.items()},
+                f,
+                indent=2,
+            )
+        logger.debug("Client registry saved (%d clients).", len(_registry))
+    except Exception as exc:
+        logger.error("Failed to save client registry: %s", exc)
+
+
+def load_from_disk() -> None:
+    """Load the client registry from disk on startup.
+
+    Call this once from app lifespan. Safe to call even if file doesn't exist.
+    """
+    global _registry
+    if not os.path.exists(_REGISTRY_FILE):
+        logger.info("No client registry file found — starting fresh.")
+        return
+    try:
+        with open(_REGISTRY_FILE) as f:
+            data = json.load(f)
+        _registry = {cid: ClientConfig(**cfg) for cid, cfg in data.items()}
+        logger.info("Loaded %d client(s) from registry file.", len(_registry))
+    except Exception as exc:
+        logger.error("Failed to load client registry: %s — starting fresh.", exc)
+        _registry = {}
+
+
+# ── Registry operations ───────────────────────────────────────────────────────
 
 def register(
     client_id: str,
@@ -36,7 +77,7 @@ def register(
     max_context_tokens: int | None = None,
     notes: str = "",
 ) -> ClientConfig:
-    """Register a new client (or update existing)."""
+    """Register a new client (or update existing) and persist to disk."""
     cfg = ClientConfig(
         client_id=client_id,
         display_name=display_name or client_id,
@@ -46,12 +87,12 @@ def register(
         notes=notes,
     )
     _registry[client_id] = cfg
+    _save()
     logger.info("Client registered: '%s' (%s)", client_id, display_name)
     return cfg
 
 
 def get(client_id: str) -> ClientConfig | None:
-    """Return config for *client_id*, or None if not registered."""
     return _registry.get(client_id)
 
 
@@ -60,18 +101,14 @@ def exists(client_id: str) -> bool:
 
 
 def list_clients() -> list[ClientConfig]:
-    """Return all registered clients."""
     return list(_registry.values())
 
 
 def remove(client_id: str, delete_vectors: bool = False) -> bool:
-    """Remove a client from the registry.
-
-    If *delete_vectors* is True, also deletes their ChromaDB collection.
-    """
     if client_id not in _registry:
         return False
     del _registry[client_id]
+    _save()
     if delete_vectors:
         delete_collection(client_id)
     logger.info("Client removed: '%s'", client_id)
@@ -79,7 +116,6 @@ def remove(client_id: str, delete_vectors: bool = False) -> bool:
 
 
 def client_stats(client_id: str) -> dict:
-    """Return basic stats for a client."""
     cfg = get(client_id)
     if not cfg:
         return {}

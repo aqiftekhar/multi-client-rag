@@ -24,6 +24,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Multi Tenant RAG starting up...")
+
+    # Restore client registry from disk first
+    from app.clients.manager import load_from_disk
+    load_from_disk()
+
     # Warm up embedding model on startup so first query is fast
     try:
         from app.rag.embedder import embed_query
@@ -32,7 +37,7 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Embedding warmup failed (non-fatal): %s", exc)
     yield
-    logger.info("Multi Tenant RAG shutting down.")
+    logger.info("SkyHi RAG shutting down.")
 
 
 # ── App ────────────────────────────────────────────────────────────────────────

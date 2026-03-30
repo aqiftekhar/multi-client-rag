@@ -284,6 +284,27 @@
         </div>
         <div id="ingAlert" class="mt2"></div>
       </div>
+
+      <!-- PDF Upload card -->
+      <div class="card" style="margin-top:16px">
+        <div class="card-title">Upload PDF</div>
+        <div class="field">
+          <label>Client *</label>
+          <select id="pdfClient"><option value="">— Select client —</option></select>
+        </div>
+        <div class="field">
+          <label>PDF File *</label>
+          <input type="file" id="pdfFile" accept=".pdf"
+                 style="background:var(--surface2);border:1px solid var(--border);
+                        border-radius:6px;padding:9px 12px;color:var(--text);
+                        font-size:13px;width:100%"/>
+        </div>
+        <button class="btn btn-primary" onclick="uploadPDF()">
+          <span id="pdfBtnTxt">Upload & Ingest PDF</span>
+        </button>
+        <div id="pdfAlert" class="mt2"></div>
+        <div id="pdfResult" class="mt2"></div>
+      </div>
       <div class="card">
         <div class="card-title">Ingestion Result</div>
         <div id="ingResult" style="color:var(--muted);font-size:13px">Results will appear here after ingestion.</div>
@@ -482,13 +503,55 @@ async function deleteClient(id) {
 }
 
 function populateAllClientSelects(clients) {
-  ['ingClient','qClient','evalClient','sigClient'].forEach(selId => {
+  ['ingClient','qClient','evalClient','sigClient','pdfClient'].forEach(selId => {
     const sel = document.getElementById(selId);
     if (!sel) return;
     const cur = sel.value;
     sel.innerHTML = '<option value="">— select client —</option>' +
       clients.map(c => `<option value="${c.client_id}" ${c.client_id===cur?'selected':''}>${c.display_name} (${c.client_id})</option>`).join('');
   });
+}
+
+async function uploadPDF() {
+  const client = document.getElementById('pdfClient').value;
+  const fileInput = document.getElementById('pdfFile');
+  const file = fileInput.files[0];
+
+  if (!client) { showAlert('pdfAlert', 'Select a client first.', 'error'); return; }
+  if (!file)   { showAlert('pdfAlert', 'Choose a PDF file.', 'error'); return; }
+
+  const btn = document.getElementById('pdfBtnTxt');
+  btn.innerHTML = '<span class="spinner"></span> Extracting & ingesting...';
+
+  const formData = new FormData();
+  formData.append('client_id', client);
+  formData.append('file', file);
+
+  try {
+    const r = await fetch('/ingest/pdf', { method: 'POST', body: formData });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const res = await r.json();
+    document.getElementById('pdfResult').innerHTML = `
+      <div class="alert alert-success">PDF ingested: <strong>${escHtml(file.name)}</strong></div>
+      <div class="grid2" style="gap:10px;margin-top:10px">
+        <div class="stat"><div class="stat-val">${res.total_chunks}</div><div class="stat-label">Total Chunks</div></div>
+        <div class="stat"><div class="stat-val stat-success">${res.stored_chunks}</div><div class="stat-label">Stored</div></div>
+        <div class="stat"><div class="stat-val stat-warn">${res.duplicate_chunks}</div><div class="stat-label">Duplicates</div></div>
+        <div class="stat"><div class="stat-val stat-danger">${res.anomalous_chunks}</div><div class="stat-label">Anomalous</div></div>
+      </div>
+      <div style="margin-top:8px;font-size:12px;color:var(--muted)">
+        Doc ID: <code style="color:var(--accent2)">${res.doc_id}</code>
+      </div>
+      ${res.errors.length ? `<div class="alert alert-warn" style="margin-top:8px;font-size:12px">${res.errors.join('<br>')}</div>` : ''}`;
+    fileInput.value = '';
+    loadDashboard();
+  } catch(e) {
+    showAlert('pdfAlert', e.message, 'error');
+  }
+  btn.textContent = 'Upload & Ingest PDF';
 }
 
 async function populateClientSelect(selId) {
