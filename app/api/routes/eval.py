@@ -110,3 +110,72 @@ def get_signals_route(client_id: str, limit: int = 50) -> SignalSummaryResponse:
             for s in recent
         ],
     )
+
+@router.get("/hallucinations/{client_id}")
+def get_hallucinations(client_id: str, limit: int = 50) -> dict:
+    """Return recent hallucination records for a client.
+
+    Use this to understand what is going wrong with retrieval.
+    """
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    from app.evaluation.hallucination_log import get_records
+    records = get_records(client_id=client_id, limit=limit)
+    return {
+        "client_id": client_id,
+        "total": len(records),
+        "records": records,
+    }
+
+
+@router.get("/hallucinations/{client_id}/analysis")
+def analyze_hallucinations(client_id: str) -> dict:
+    """Analyze hallucination patterns and return actionable recommendations.
+
+    This is the Offline Analysis step in the improvement loop.
+    Use the recommendations to improve retrieval, chunking, and prompts.
+    """
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    from app.evaluation.hallucination_log import analyze
+    return analyze(client_id=client_id)
+
+
+## The complete picture
+"""
+User Query
+    ↓
+RetrievalAgent
+    normal:          coarse_k=20 → cross-encoder top-5
+    after hallucination: coarse_k=40 → cross-encoder top-5  ← retry_retrieval()
+    ↓
+LLM call
+    normal:          standard prompt
+    strict_mode=True: + STRICT MODE instruction              ← regenerate_answer(strict_mode)
+    ↓
+ValidationAgent
+    schema check
+    source check     → filename matching
+    faithfulness     → cross-encoder scores answer vs chunks
+                       < -2.0 = CONTAIN (clear answer, strict_mode=True)  ← contain
+                                                                           ← verify
+    ↓
+CorrectionAgent
+    hallucination    → tighten query, retry              ← recover
+    low_confidence   → reformulate, retry
+    retrieval_fail   → simplify, retry
+    max retries hit  → LOG EVERYTHING                    ← improve
+                       hallucination → safe fallback
+                       low_confidence → ask clarification
+    ↓
+EvaluationAgent
+    success with recovery → LOG with recovery_succeeded=True
+    ↓
+data/hallucination_log.jsonl
+    ↓
+GET /eval/hallucinations/{client_id}/analysis
+    → which queries hallucinate most
+    → which documents are problematic
+    → recovery rate
+    → actionable recommendations    ← Offline Analysis → Deploy Better Version
+"""

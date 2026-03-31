@@ -29,6 +29,9 @@ async def lifespan(app: FastAPI):
     from app.clients.manager import load_from_disk
     load_from_disk()
 
+    from app.evaluation.hallucination_log import load_from_disk as load_hallucination_log
+    load_hallucination_log()
+
     # Warm up embedding model on startup so first query is fast
     try:
         from app.rag.embedder import embed_query

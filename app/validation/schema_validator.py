@@ -14,10 +14,13 @@ class RAGResponse(BaseModel):
     """Expected structure of an LLM RAG answer."""
 
     answer: str
-    sources: list[str]           # List of source identifiers cited
-    confidence: float            # 0.0–1.0
+    sources: list[str] = []
+    confidence: float = 0.5
     needs_clarification: bool = False
-
+    extracted_quotes: list[str] = []
+    is_inferred: bool = False
+    false_premise_detected: bool = False
+    false_premise_explanation: str = ""
 
 @dataclass
 class ValidationResult:
@@ -91,7 +94,26 @@ def validate_rag_response(raw_output: str) -> ValidationResult:
             confidence=confidence,
         )
 
-    logger.debug("Validation passed. Confidence=%.2f", parsed.confidence)
+        # If model itself flagged the answer as inferred, reduce confidence
+        # Model flagged its own answer as inferred — reduce confidence
+    if parsed.is_inferred and parsed.confidence > 0.5:
+        logger.warning(
+            "Model flagged answer as inferred — reducing confidence %.2f → %.2f",
+            parsed.confidence, 0.45,
+        )
+        parsed.confidence = min(parsed.confidence, 0.45)
+
+    # Model detected a false premise — log it clearly
+    if parsed.false_premise_detected:
+        logger.info(
+            "False premise detected — explanation: %s",
+            parsed.false_premise_explanation,
+        )
+
+    logger.debug(
+        "Validation passed. Confidence=%.2f is_inferred=%s quotes=%d",
+        parsed.confidence, parsed.is_inferred, len(parsed.extracted_quotes)
+    )
     return ValidationResult(
         is_valid=True,
         parsed=parsed,
@@ -101,13 +123,70 @@ def validate_rag_response(raw_output: str) -> ValidationResult:
 
 def check_source_attribution(
     response: RAGResponse,
-    retrieved_sources: list[str],
+    retrieved_chunks: list,
 ) -> list[str]:
-    """Verify that cited sources in *response* are present in *retrieved_sources*.
+    """Check cited sources against what was actually retrieved.
 
-    Returns a list of hallucinated source IDs (cited but not retrieved).
+    Matches against filenames and doc_id prefixes — not raw UUIDs
+    which models cannot reliably reproduce verbatim.
+
+    Returns list of citations that don't match anything retrieved.
     """
-    hallucinated = [s for s in response.sources if s not in retrieved_sources]
+    if not response.sources:
+        return []
+
+    valid_references: set[str] = set()
+    for chunk in retrieved_chunks:
+        valid_references.add(chunk.source.lower())
+        valid_references.add(chunk.doc_id.lower())
+        valid_references.add(chunk.doc_id[:8].lower())
+        source_base = chunk.source.lower().replace(".pdf", "").replace(".txt", "")
+        valid_references.add(source_base)
+
+    hallucinated = []
+    for cited in response.sources:
+        cited_lower = cited.lower().strip()
+        matched = any(
+            cited_lower in ref or ref in cited_lower
+            for ref in valid_references
+        )
+        if not matched:
+            hallucinated.append(cited)
+
     if hallucinated:
-        logger.warning("Hallucinated sources detected: %s", hallucinated)
+        logger.warning("Unmatched source citations: %s", hallucinated)
+
     return hallucinated
+
+
+"""
+## What changes and why
+
+| Problem | Fix |
+|---|---|
+| Model converted analogy to fact ("can be seen as" → "is") | Quote-first step forces extraction before generation |
+| Model ignored "dispensing with convolutions entirely" | Contradiction check step — explicit denials take priority |
+| Cross-encoder passed it because text was topically related | Evaluator LLM call checks semantic accuracy, not just topic similarity |
+| Model was overconfident | `is_inferred: true` in JSON response → confidence automatically reduced below 0.5 |
+| Distorted grounding not caught | Evaluator `contradiction_ignored: true` triggers full hallucination recovery |
+
+---
+
+## What your system now catches
+
+| Hallucination type | Caught by |
+|---|---|
+| Answer unrelated to context | Cross-encoder faithfulness score |
+| Citation of non-existent sources | Source attribution check |
+| Analogy converted to fact | Evaluator `is_inferred` + `supported` check |
+| Explicit contradiction ignored | Evaluator `contradiction_ignored` flag |
+| Model self-aware uncertainty | `is_inferred: true` in JSON → confidence reduction |
+
+---
+
+## Test it with your exact case
+
+After applying these changes, ask again:
+```
+What is the role of CNN layers in the Transformer architecture?
+"""

@@ -29,8 +29,14 @@ class AgentContext:
     sources_used: list[str] = field(default_factory=list)
     confidence: float = 0.0
     retry_count: int = 0
+    retry_reason: str = ""
+    strict_mode: bool = False
     signals: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Populated by ValidationAgent when hallucination is detected
+    hallucination_faithfulness_score: float = 0.0
+    hallucination_type: str = ""
+    unmatched_citations: list[str] = field(default_factory=list)
 
 
 @dataclass
