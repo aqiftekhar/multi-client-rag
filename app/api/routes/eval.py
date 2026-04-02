@@ -140,7 +140,33 @@ def analyze_hallucinations(client_id: str) -> dict:
     from app.evaluation.hallucination_log import analyze
     return analyze(client_id=client_id)
 
+@router.get("/hallucinations/{client_id}")
+def get_hallucinations(client_id: str, limit: int = 50) -> dict:
+    """Return recent hallucination records for a client."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    try:
+        from app.evaluation.hallucination_log import get_records
+        records = get_records(client_id=client_id, limit=limit)
+        return {"client_id": client_id, "total": len(records), "records": records}
+    except Exception:
+        return {"client_id": client_id, "total": 0, "records": []}
 
+
+@router.get("/hallucinations/{client_id}/analysis")
+def analyze_hallucinations(client_id: str) -> dict:
+    """Analyze hallucination patterns and return actionable recommendations."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    try:
+        from app.evaluation.hallucination_log import analyze
+        return analyze(client_id=client_id)
+    except Exception:
+        return {
+            "total_hallucinations": 0,
+            "message": "No hallucination data yet. Run some queries first.",
+        }
+    
 ## The complete picture
 """
 User Query

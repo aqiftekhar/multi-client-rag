@@ -74,7 +74,13 @@ def summarize(client_id: str) -> dict:
     failures = counts.get(SignalType.TASK_FAILURE, 0) + counts.get(SignalType.VALIDATION_FAILURE, 0)
     retries = counts.get(SignalType.AGENT_RETRY, 0)
 
-    task_completion_rate = successes / total if total > 0 else 0.0
+    # Calculate rates based on terminal outcomes only (success + failure)
+    # Retries are internal pipeline events, not separate user queries
+    terminal_events = successes + failures
+    task_completion_rate = successes / terminal_events if terminal_events > 0 else 0.0
+
+
+    # Retry rate = how often at least one retry was needed (per terminal event)
     retry_rate = retries / total if total > 0 else 0.0
 
     return {

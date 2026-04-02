@@ -185,7 +185,78 @@ def ingest(req: IngestRequest) -> IngestResponse:
         errors=result.errors,
     )
 
+@router.get("/{client_id}/documents")
+def list_documents(client_id: str) -> dict:
+    """List all ingested documents for a client with chunk counts and metadata."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
 
+    try:
+        from app.db.chroma_client import get_or_create_collection
+        collection = get_or_create_collection(client_id)
+        if collection.count() == 0:
+            return {"client_id": client_id, "documents": [], "total_chunks": 0}
+
+        result = collection.get(include=["metadatas"])
+        metadatas = result["metadatas"]
+
+        # Group chunks by doc_id
+        docs: dict[str, dict] = {}
+        for meta in metadatas:
+            doc_id = meta.get("doc_id", "unknown")
+            if doc_id not in docs:
+                docs[doc_id] = {
+                    "doc_id": doc_id,
+                    "source": meta.get("source", "unknown"),
+                    "ingested_at": meta.get("ingested_at", ""),
+                    "chunk_count": 0,
+                    "file_type": meta.get("file_type", "text"),
+                }
+            docs[doc_id]["chunk_count"] += 1
+
+        return {
+            "client_id": client_id,
+            "documents": sorted(
+                docs.values(),
+                key=lambda x: x["ingested_at"],
+                reverse=True,
+            ),
+            "total_chunks": len(metadatas),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/{client_id}/documents/{doc_id}")
+def delete_document(client_id: str, doc_id: str) -> dict:
+    """Delete all chunks belonging to a specific document."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+
+    try:
+        from app.db.chroma_client import get_or_create_collection
+        collection = get_or_create_collection(client_id)
+        result = collection.get(where={"doc_id": doc_id}, include=["metadatas"])
+        if not result["ids"]:
+            raise HTTPException(status_code=404, detail=f"Document '{doc_id}' not found.")
+
+        chunk_count = len(result["ids"])
+        collection.delete(ids=result["ids"])
+
+        logger.info(
+            "Deleted doc '%s' for client '%s': %d chunks removed.",
+            doc_id, client_id, chunk_count,
+        )
+        return {
+            "deleted": doc_id,
+            "client_id": client_id,
+            "chunks_removed": chunk_count,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    
 @router.post("/pdf", response_model=IngestResponse)
 async def ingest_pdf(
     client_id: str = Form(...),

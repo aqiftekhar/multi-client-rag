@@ -28,6 +28,15 @@ async def lifespan(app: FastAPI):
     # Restore client registry from disk first
     from app.clients.manager import load_from_disk
     load_from_disk()
+    from app.clients.manager import load_from_disk
+    load_from_disk()
+
+    # Rebuild BM25 indexes from ChromaDB for all registered clients
+    # This ensures hybrid search works after app restart without re-ingesting
+    from app.rag.bm25_index import rebuild_from_chromadb
+    from app.clients.manager import list_clients
+    for client_cfg in list_clients():
+        rebuild_from_chromadb(client_cfg.client_id)
 
     from app.evaluation.hallucination_log import load_from_disk as load_hallucination_log
     load_hallucination_log()

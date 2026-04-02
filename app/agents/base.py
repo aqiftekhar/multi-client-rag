@@ -29,8 +29,9 @@ class AgentContext:
     sources_used: list[str] = field(default_factory=list)
     confidence: float = 0.0
     retry_count: int = 0
-    retry_reason: str = ""
+    retry_reason: str = "" # "hallucination"|"low_confidence"|"retrieval_failure"|"not_answerable"
     strict_mode: bool = False
+    original_query: str = ""   # set once on first run, never modified
     signals: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     # Populated by ValidationAgent when hallucination is detected

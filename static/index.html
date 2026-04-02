@@ -188,6 +188,14 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10"/><path d="M12 20V4"/><path d="M6 20v-6"/></svg>
       Signals
     </div>
+    <div class="nav-item" data-page="documents" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      Documents
+    </div>
+    <div class="nav-item" data-page="analysis" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+      Analysis
+    </div>
   </nav>
   <div>
     <div class="status-dot" id="statusDot"></div>
@@ -381,7 +389,37 @@
     </div>
     <div id="signalsContent" style="color:var(--muted);font-size:13px">Select a client to view signals.</div>
   </div>
+<!-- DOCUMENTS -->
+  <div class="page" id="page-documents">
+    <div class="page-title">Documents</div>
+    <div class="page-sub">All ingested documents per client — view, manage, delete</div>
+    <div class="flex gap2 items-center" style="margin-bottom:16px">
+      <label style="font-size:12px;color:var(--muted)">Client:</label>
+      <select id="docsClient" onchange="loadDocuments()"
+              style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;
+                     padding:7px 12px;color:var(--text);font-size:13px;outline:none;flex:0 0 240px">
+        <option value="">— select client —</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadDocuments()">↻ Refresh</button>
+    </div>
+    <div id="docsContent" style="color:var(--muted);font-size:13px">Select a client to view documents.</div>
+  </div>
 
+  <!-- HALLUCINATION ANALYSIS -->
+  <div class="page" id="page-analysis">
+    <div class="page-title">Hallucination Analysis</div>
+    <div class="page-sub">Offline analysis — find patterns and improve your system</div>
+    <div class="flex gap2 items-center" style="margin-bottom:16px">
+      <label style="font-size:12px;color:var(--muted)">Client:</label>
+      <select id="analysisClient" onchange="loadAnalysis()"
+              style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;
+                     padding:7px 12px;color:var(--text);font-size:13px;outline:none;flex:0 0 240px">
+        <option value="">— select client —</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadAnalysis()">↻ Refresh</button>
+    </div>
+    <div id="analysisContent" style="color:var(--muted);font-size:13px">Select a client to view hallucination analysis.</div>
+  </div>
 </main>
 </div>
 
@@ -397,6 +435,8 @@ function nav(el) {
   if (el.dataset.page === 'clients') loadClients();
   if (el.dataset.page === 'dashboard') loadDashboard();
   if (el.dataset.page === 'signals') populateClientSelect('sigClient');
+  if (el.dataset.page === 'documents') populateClientSelect('docsClient');
+  if (el.dataset.page === 'analysis') populateClientSelect('analysisClient');
 }
 
 // ── API helper ────────────────────────────────────────────────────────────────
@@ -503,7 +543,7 @@ async function deleteClient(id) {
 }
 
 function populateAllClientSelects(clients) {
-  ['ingClient','qClient','evalClient','sigClient','pdfClient'].forEach(selId => {
+  ['ingClient','qClient','evalClient','sigClient','pdfClient','docsClient','analysisClient'].forEach(selId => {
     const sel = document.getElementById(selId);
     if (!sel) return;
     const cur = sel.value;
@@ -649,6 +689,7 @@ async function sendQuery() {
         <div class="msg-meta">
           <span class="badge ${confClass}">confidence: ${(res.confidence*100).toFixed(0)}%</span>
           <span class="badge badge-info">${res.chunks_used} chunks</span>
+          <span class="badge badge-info" style="background:rgba(78,205,196,0.15);color:var(--accent2)">hybrid search</span>
           ${res.retry_count > 0 ? `<span class="badge badge-warn">${res.retry_count} retries</span>` : ''}
           <span style="color:var(--muted);font-size:10px">run: ${res.run_id}</span>
         </div>
@@ -766,6 +807,208 @@ async function loadSignals() {
   } catch(e) { container.innerHTML = `<div class="alert alert-error">${e.message}</div>`; }
 }
 
+// ── Documents ─────────────────────────────────────────────────────────────────
+async function loadDocuments() {
+  const client = document.getElementById('docsClient').value;
+  const container = document.getElementById('docsContent');
+  if (!client) { container.innerHTML = '<div style="color:var(--muted);font-size:13px">Select a client.</div>'; return; }
+  container.innerHTML = '<div style="color:var(--muted);font-size:13px"><span class="spinner"></span> Loading...</div>';
+  try {
+    const data = await api(`/ingest/${client}/documents`);
+    if (!data.documents.length) {
+      container.innerHTML = '<div class="alert alert-info">No documents ingested yet for this client.</div>';
+      return;
+    }
+    container.innerHTML = `
+      <div class="grid3" style="margin-bottom:16px">
+        <div class="stat"><div class="stat-val stat-accent">${data.documents.length}</div><div class="stat-label">Documents</div></div>
+        <div class="stat"><div class="stat-val">${data.total_chunks}</div><div class="stat-label">Total Chunks</div></div>
+        <div class="stat"><div class="stat-val stat-success">${data.documents.filter(d=>d.file_type==='pdf').length}</div><div class="stat-label">PDFs</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Ingested Documents</div>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Source</th><th>Type</th><th>Chunks</th><th>Ingested</th><th></th></tr></thead>
+          <tbody>${data.documents.map(d => `
+            <tr>
+              <td><span style="font-size:13px;font-weight:500">${escHtml(d.source)}</span>
+                  <div style="font-size:10px;color:var(--muted);margin-top:2px">${d.doc_id.slice(0,12)}...</div></td>
+              <td><span class="pill">${d.file_type || 'text'}</span></td>
+              <td><span class="badge badge-info">${d.chunk_count}</span></td>
+              <td style="color:var(--muted);font-size:11px">${d.ingested_at.slice(0,10)}</td>
+              <td><button class="btn btn-danger btn-sm"
+                    onclick="deleteDocument('${client}','${d.doc_id}','${escHtml(d.source)}')">Delete</button></td>
+            </tr>`).join('')}
+          </tbody></table></div>
+      </div>`;
+  } catch(e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
+
+async function deleteDocument(clientId, docId, source) {
+  if (!confirm(`Delete "${source}"? This removes all its chunks from the vector store.`)) return;
+  try {
+    await api(`/ingest/${clientId}/documents/${docId}`, 'DELETE');
+    loadDocuments();
+    loadDashboard();
+  } catch(e) {
+    alert(`Delete failed: ${e.message}`);
+  }
+}
+
+// ── Hallucination Analysis ────────────────────────────────────────────────────
+async function loadAnalysis() {
+  const client = document.getElementById('analysisClient').value;
+  const container = document.getElementById('analysisContent');
+  if (!client) { container.innerHTML = '<div style="color:var(--muted);font-size:13px">Select a client.</div>'; return; }
+  container.innerHTML = '<div style="color:var(--muted);font-size:13px"><span class="spinner"></span> Analyzing...</div>';
+
+  try {
+    const data = await api(`/eval/hallucinations/${client}/analysis`);
+
+    if (!data.total_hallucinations) {
+      container.innerHTML = `<div class="alert alert-success">
+        No hallucinations recorded yet for this client.<br>
+        <span style="font-size:12px;opacity:0.8">Run some queries to populate the analysis.</span>
+      </div>`;
+      return;
+    }
+
+    const recoveryPct = Math.round((data.recovery_rate || 0) * 100);
+    const recoveryColor = recoveryPct >= 70 ? 'var(--success)' : recoveryPct >= 40 ? 'var(--warn)' : 'var(--danger)';
+
+    // Hallucination type bars
+    const typeEntries = Object.entries(data.hallucination_types || {});
+    const maxTypeCount = Math.max(...typeEntries.map(([,v]) => v), 1);
+    const typeBars = typeEntries.map(([type, count]) => `
+      <div class="metric-row">
+        <span class="metric-name" style="width:200px;font-size:11px">${type.replace(/_/g,' ')}</span>
+        <div class="metric-bar-wrap"><div class="metric-bar"
+          style="width:${Math.round((count/maxTypeCount)*100)}%;background:var(--danger)"></div></div>
+        <span class="metric-val" style="color:var(--danger)">${count}</span>
+      </div>`).join('');
+
+    // Strategy effectiveness table
+    const strategyRows = Object.entries(data.strategy_effectiveness || {}).map(([name, s]) => `
+      <tr>
+        <td style="font-size:12px">${name.replace(/_/g,' ')}</td>
+        <td>${s.total}</td>
+        <td style="color:var(--success)">${s.recovered}</td>
+        <td>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div class="metric-bar-wrap" style="width:80px">
+              <div class="metric-bar" style="width:${Math.round(s.rate*100)}%;
+                   background:${s.rate>=0.7?'var(--success)':s.rate>=0.4?'var(--warn)':'var(--danger)'}"></div>
+            </div>
+            <span style="font-size:12px">${Math.round(s.rate*100)}%</span>
+          </div>
+        </td>
+      </tr>`).join('');
+
+    // Problematic sources
+    const sourceRows = (data.problematic_sources || []).map(([src, count]) => `
+      <tr>
+        <td style="font-size:12px">${escHtml(src)}</td>
+        <td><span class="badge badge-danger">${count} events</span></td>
+        <td style="font-size:11px;color:var(--warn)">Consider re-ingesting</td>
+      </tr>`).join('');
+
+    // Recommendations
+    const recommendations = (data.recommendations || []).map(r => `
+      <div style="display:flex;gap:10px;padding:12px;background:var(--surface2);
+                  border-radius:6px;border-left:3px solid var(--warn);margin-bottom:8px">
+        <span style="color:var(--warn);font-size:16px;flex-shrink:0">⚠</span>
+        <span style="font-size:13px;line-height:1.5">${escHtml(r)}</span>
+      </div>`).join('');
+
+    // Common query terms
+    const terms = (data.common_query_terms || []).slice(0, 8).map(([term, count]) =>
+      `<span class="pill" style="margin:3px;font-size:11px">${escHtml(term)} <strong>${count}</strong></span>`
+    ).join('');
+
+    container.innerHTML = `
+      <!-- Summary stats -->
+      <div class="grid4" style="margin-bottom:16px">
+        <div class="stat">
+          <div class="stat-val stat-danger">${data.total_hallucinations}</div>
+          <div class="stat-label">Total Detected</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val stat-success">${data.recovered || 0}</div>
+          <div class="stat-label">Recovered</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val stat-warn">${data.unrecovered || 0}</div>
+          <div class="stat-label">Unrecovered</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val" style="color:${recoveryColor}">${recoveryPct}%</div>
+          <div class="stat-label">Recovery Rate</div>
+        </div>
+      </div>
+
+      <!-- Faithfulness score -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-title">Average Faithfulness Score</div>
+        <div style="display:flex;align-items:center;gap:16px">
+          <div style="font-size:32px;font-weight:700;color:${
+            (data.avg_faithfulness_score||0) > 0 ? 'var(--success)' :
+            (data.avg_faithfulness_score||0) > -2 ? 'var(--warn)' : 'var(--danger)'
+          }">${(data.avg_faithfulness_score||0).toFixed(3)}</div>
+          <div style="font-size:12px;color:var(--muted);line-height:1.6">
+            > 2.0 = strongly grounded<br>
+            0 to 2 = moderate<br>
+            -2 to 0 = weak<br>
+            < -2 = not grounded
+          </div>
+        </div>
+      </div>
+
+      <div class="grid2" style="margin-bottom:16px">
+        <!-- Hallucination types -->
+        <div class="card">
+          <div class="card-title">Hallucination Types</div>
+          ${typeBars || '<div style="color:var(--muted);font-size:13px">No data</div>'}
+        </div>
+
+        <!-- Common query terms -->
+        <div class="card">
+          <div class="card-title">Common Query Terms in Failures</div>
+          <div style="line-height:2">${terms || '<div style="color:var(--muted);font-size:13px">No data</div>'}</div>
+        </div>
+      </div>
+
+      <div class="grid2" style="margin-bottom:16px">
+        <!-- Problematic sources -->
+        <div class="card">
+          <div class="card-title">Problematic Sources</div>
+          ${sourceRows ? `<div class="table-wrap"><table>
+            <thead><tr><th>Source</th><th>Events</th><th>Action</th></tr></thead>
+            <tbody>${sourceRows}</tbody></table></div>` :
+            '<div style="color:var(--muted);font-size:13px">No problematic sources identified.</div>'}
+        </div>
+
+        <!-- Recovery strategies -->
+        <div class="card">
+          <div class="card-title">Recovery Strategy Effectiveness</div>
+          ${strategyRows ? `<div class="table-wrap"><table>
+            <thead><tr><th>Strategy</th><th>Total</th><th>Recovered</th><th>Rate</th></tr></thead>
+            <tbody>${strategyRows}</tbody></table></div>` :
+            '<div style="color:var(--muted);font-size:13px">No recovery data yet.</div>'}
+        </div>
+      </div>
+
+      <!-- Recommendations -->
+      ${recommendations ? `<div class="card">
+        <div class="card-title">Actionable Recommendations</div>
+        ${recommendations}
+      </div>` : ''}`;
+
+  } catch(e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+  }
+}
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

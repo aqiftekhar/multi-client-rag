@@ -108,11 +108,7 @@ def get_records(client_id: str | None = None, limit: int = 100) -> list[dict]:
 
 
 def analyze(client_id: str | None = None) -> dict:
-    """Analyze hallucination patterns to surface actionable improvements.
-
-    This is the 'Offline Analysis' step in the improvement loop.
-    Returns structured insights about what to fix.
-    """
+    """Analyze hallucination patterns to surface actionable improvements."""
     records = get_records(client_id=client_id, limit=1000)
 
     if not records:
@@ -125,26 +121,70 @@ def analyze(client_id: str | None = None) -> dict:
     recovered = sum(1 for r in records if r.get("recovery_succeeded"))
     unrecovered = total - recovered
 
-    # Which queries hallucinate most — find common patterns
+    # ── Query term analysis ───────────────────────────────────────────────────
+    # Use original_query only — not the reformulated strict-mode version
+    # Filter out stop words and system-injected terms
+    _STOP_WORDS = {
+        "the", "is", "in", "of", "and", "to", "a", "that", "with",
+        "for", "this", "are", "was", "what", "how", "does", "from",
+        # System-injected strict mode terms — must be excluded
+        "only", "information", "explicitly", "stated", "provided",
+        "context", "use", "please", "specific", "cite", "source",
+        "documents", "about", "tell", "me", "give", "describe",
+        "explain", "using", "based", "document",
+    }
+
     query_words: dict[str, int] = defaultdict(int)
     for r in records:
-        for word in r.get("original_query", "").lower().split():
-            if len(word) > 4:  # skip short words
-                query_words[word] += 1
-    common_query_terms = sorted(query_words.items(), key=lambda x: x[1], reverse=True)[:10]
+        # Always use original_query — reformulated queries contain system noise
+        query = r.get("original_query") or r.get("final_query", "")
+        for word in query.lower().split():
+            clean = word.strip("?.!,")
+            if len(clean) > 3 and clean not in _STOP_WORDS:
+                query_words[clean] += 1
+    common_query_terms = sorted(
+        query_words.items(), key=lambda x: x[1], reverse=True
+    )[:10]
 
-    # Which sources produce the most hallucinations
-    source_counts: dict[str, int] = defaultdict(int)
+    # ── Source analysis — distinguish blame from co-occurrence ────────────────
+    # A source is "problematic" only if it was the TOP retrieved source
+    # AND the answer was not recovered. Being retrieved during a failed
+    # attempt does not mean the source caused the failure.
+    source_unrecovered: dict[str, int] = defaultdict(int)
+    source_total: dict[str, int] = defaultdict(int)
+
     for r in records:
-        for src in r.get("retrieved_sources", []):
-            source_counts[src] += 1
-    problematic_sources = sorted(source_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        sources = r.get("retrieved_sources", [])
+        if not sources:
+            continue
+        # Only count the primary source (first retrieved)
+        primary = sources[0]
+        source_total[primary] += 1
+        if not r.get("recovery_succeeded"):
+            source_unrecovered[primary] += 1
 
-    # Average faithfulness score — lower = worse retrieval quality overall
+    # Only flag as problematic if majority of its appearances are unrecovered
+    problematic_sources = []
+    for src, total_count in source_total.items():
+        unrecovered_count = source_unrecovered.get(src, 0)
+        failure_rate = unrecovered_count / total_count if total_count > 0 else 0
+        if failure_rate >= 0.5 and total_count >= 2:
+            problematic_sources.append((src, unrecovered_count))
+    problematic_sources.sort(key=lambda x: x[1], reverse=True)
+
+    # ── Faithfulness scores ───────────────────────────────────────────────────
     scores = [r.get("faithfulness_score", 0) for r in records]
     avg_faithfulness = sum(scores) / len(scores) if scores else 0
 
-    # Recovery strategy effectiveness
+    # ── Hallucination type breakdown ──────────────────────────────────────────
+    type_counts: dict[str, int] = defaultdict(int)
+    for r in records:
+        type_counts[r.get("hallucination_type", "unknown")] += 1
+
+    false_premise_count = type_counts.get("false_premise", 0) + \
+                          type_counts.get("grounded_but_distorted", 0)
+
+    # ── Recovery strategy effectiveness ──────────────────────────────────────
     strategy_counts: dict[str, int] = defaultdict(int)
     strategy_success: dict[str, int] = defaultdict(int)
     for r in records:
@@ -162,33 +202,47 @@ def analyze(client_id: str | None = None) -> dict:
         for strategy, count in strategy_counts.items()
     }
 
-    # Actionable recommendations
+    # ── Actionable recommendations ────────────────────────────────────────────
     recommendations = []
 
-    if avg_faithfulness < -1.0:
+    # Only recommend COARSE_K increase if faithfulness is low AND
+    # the failure type is content_not_grounded (not false premise)
+    content_not_grounded = type_counts.get("content_not_grounded", 0)
+    if avg_faithfulness < -1.0 and content_not_grounded > false_premise_count:
         recommendations.append(
-            "Average faithfulness score is low. Consider increasing COARSE_K "
-            "to retrieve more candidates, or re-chunk your documents with smaller chunk sizes."
+            "Average faithfulness score is low and failures are mostly content retrieval issues. "
+            "Consider increasing COARSE_K to retrieve more candidates, "
+            "or re-chunk your documents with smaller chunk sizes."
+        )
+
+    # False premise questions are a user education issue, not a data issue
+    if false_premise_count > total * 0.3:
+        recommendations.append(
+            f"{false_premise_count}/{total} hallucinations involved false premises or "
+            "distorted interpretations — the document explicitly contradicted the question. "
+            "This is correct system behaviour. Consider adding example queries to "
+            "help users ask better questions."
         )
 
     if unrecovered > total * 0.3:
         recommendations.append(
-            f"{unrecovered}/{total} hallucinations could not be recovered. "
-            "Review the top problematic sources and consider re-ingesting them."
+            f"{unrecovered}/{total} hallucinations could not be recovered after all retries. "
+            "Review the queries in the records below — most are likely unanswerable "
+            "from current documents."
         )
 
+    # Only recommend re-ingestion for sources with proven high failure rates
     if problematic_sources:
-        top_src = problematic_sources[0][0]
+        top_src, count = problematic_sources[0]
         recommendations.append(
-            f"Source '{top_src}' appears in {problematic_sources[0][1]} hallucination events. "
-            "Consider re-chunking or improving the content quality of this document."
+            f"Source '{top_src}' is the primary retrieved source in {count} unrecovered "
+            "hallucination events (>50% failure rate). Consider re-chunking or "
+            "improving this document's content quality."
         )
 
-    if common_query_terms:
-        terms = [t[0] for t in common_query_terms[:3]]
+    if not recommendations:
         recommendations.append(
-            f"Queries containing {terms} frequently hallucinate. "
-            "Ensure documents covering these topics are properly ingested and chunked."
+            "No critical issues detected. System is handling hallucinations correctly."
         )
 
     return {
@@ -197,12 +251,7 @@ def analyze(client_id: str | None = None) -> dict:
         "unrecovered": unrecovered,
         "recovery_rate": round(recovered / total, 2) if total else 0,
         "avg_faithfulness_score": round(avg_faithfulness, 4),
-        "hallucination_types": {
-            r.get("hallucination_type"): sum(
-                1 for x in records if x.get("hallucination_type") == r.get("hallucination_type")
-            )
-            for r in records
-        },
+        "hallucination_types": dict(type_counts),
         "common_query_terms": common_query_terms,
         "problematic_sources": problematic_sources,
         "strategy_effectiveness": strategy_effectiveness,

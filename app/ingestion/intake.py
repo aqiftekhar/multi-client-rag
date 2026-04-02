@@ -132,6 +132,15 @@ def ingest_document(
 
     collection.upsert(ids=ids, documents=docs, metadatas=metadatas, embeddings=vecs)
 
+    # Update BM25 index with raw texts (no headers)
+    # Must happen after ChromaDB upsert so data is consistent
+    from app.rag.bm25_index import update_index
+    update_index(
+        client_id=client_id,
+        chunk_ids=ids,
+        raw_texts=[c.text for c in unique_chunks],
+    )
+
     logger.info(
         "Ingested doc '%s' for client '%s': %d stored, %d dupes, %d anomalous.",
         doc_id,
