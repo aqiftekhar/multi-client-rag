@@ -196,6 +196,12 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
       Analysis
     </div>
+    <div class="nav-item" data-page="drift" onclick="nav(this)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M2 12h2l3-9 4 18 3-9 2 9h6"/>
+      </svg>
+      Drift
+    </div>
   </nav>
   <div>
     <div class="status-dot" id="statusDot"></div>
@@ -420,6 +426,28 @@
     </div>
     <div id="analysisContent" style="color:var(--muted);font-size:13px">Select a client to view hallucination analysis.</div>
   </div>
+  <!-- DRIFT ANALYTICS -->
+  <div class="page" id="page-drift">
+    <div class="page-title">Drift Analytics</div>
+    <div class="page-sub">Embedding distribution monitoring — detect and recover from corpus drift</div>
+
+    <div class="flex gap2 items-center" style="margin-bottom:16px">
+      <label style="font-size:12px;color:var(--muted)">Client:</label>
+      <select id="driftClient" onchange="loadDriftReport()"
+              style="background:var(--surface2);border:1px solid var(--border);border-radius:6px;
+                     padding:7px 12px;color:var(--text);font-size:13px;outline:none;flex:0 0 240px">
+        <option value="">— select client —</option>
+      </select>
+      <button class="btn btn-secondary btn-sm" onclick="loadDriftReport()">↻ Refresh</button>
+      <button class="btn btn-primary btn-sm" id="reindexBtn" onclick="triggerReindex()" style="display:none">
+        ⟳ Re-index Now
+      </button>
+    </div>
+
+    <div id="driftContent" style="color:var(--muted);font-size:13px">
+      Select a client to view drift analytics.
+    </div>
+  </div>
 </main>
 </div>
 
@@ -437,6 +465,7 @@ function nav(el) {
   if (el.dataset.page === 'signals') populateClientSelect('sigClient');
   if (el.dataset.page === 'documents') populateClientSelect('docsClient');
   if (el.dataset.page === 'analysis') populateClientSelect('analysisClient');
+  if (el.dataset.page === 'drift') populateClientSelect('driftClient');
 }
 
 // ── API helper ────────────────────────────────────────────────────────────────
@@ -543,7 +572,7 @@ async function deleteClient(id) {
 }
 
 function populateAllClientSelects(clients) {
-  ['ingClient','qClient','evalClient','sigClient','pdfClient','docsClient','analysisClient'].forEach(selId => {
+  ['ingClient','qClient','evalClient','sigClient','pdfClient','docsClient','analysisClient','driftClient'].forEach(selId => {
     const sel = document.getElementById(selId);
     if (!sel) return;
     const cur = sel.value;
@@ -1009,6 +1038,220 @@ async function loadAnalysis() {
     container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
   }
 }
+
+// ── Drift Analytics ───────────────────────────────────────────────────────────
+async function loadDriftReport() {
+  const client = document.getElementById('driftClient').value;
+  const container = document.getElementById('driftContent');
+  const reindexBtn = document.getElementById('reindexBtn');
+
+  if (!client) {
+    container.innerHTML = '<div style="color:var(--muted);font-size:13px">Select a client.</div>';
+    reindexBtn.style.display = 'none';
+    return;
+  }
+
+  container.innerHTML = '<div style="color:var(--muted);font-size:13px"><span class="spinner"></span> Loading drift data...</div>';
+
+  try {
+    const [report, logData] = await Promise.all([
+      api(`/eval/drift/${client}/report`),
+      api(`/eval/drift/${client}/reindex-log`),
+    ]);
+
+    reindexBtn.style.display = 'inline-flex';
+
+    const sevColor = {
+      none: 'var(--success)', low: 'var(--accent2)',
+      medium: 'var(--warn)', high: 'var(--danger)', critical: 'var(--danger)'
+    }[report.severity] || 'var(--muted)';
+
+    const sevBg = {
+      none: 'rgba(38,222,129,0.1)', low: 'rgba(78,205,196,0.1)',
+      medium: 'rgba(247,183,49,0.1)', high: 'rgba(252,92,101,0.1)',
+      critical: 'rgba(252,92,101,0.15)'
+    }[report.severity] || 'var(--surface2)';
+
+    // Signal bars
+    const signals = report.signals;
+    const signalRows = [
+      { name: 'Centroid Drift', val: signals.centroid_drift, tip: 'Mean vector shift — did topic center move?' },
+      { name: 'Variance Drift', val: signals.variance_drift, tip: 'Spread change — did diversity change?' },
+      { name: 'JS Divergence', val: signals.js_divergence, tip: 'Distribution shape — did patterns change?' },
+      { name: 'Composite Score', val: signals.composite_score, tip: 'Weighted combination of all signals' },
+    ].map(s => {
+      const pct = Math.min(100, Math.round(s.val * 100));
+      const color = s.val < report.threshold * 0.5 ? 'var(--success)' :
+                    s.val < report.threshold ? 'var(--warn)' : 'var(--danger)';
+      return `<div class="metric-row" title="${s.tip}">
+        <span class="metric-name" style="width:140px;font-size:12px">${s.name}</span>
+        <div class="metric-bar-wrap">
+          <div class="metric-bar" style="width:${pct}%;background:${color}"></div>
+        </div>
+        <span class="metric-val" style="color:${color}">${s.val.toFixed(4)}</span>
+      </div>`;
+    }).join('');
+
+    // History chart (simple bar chart)
+    const history = report.history || [];
+    const chartHTML = history.length < 2
+      ? '<div style="color:var(--muted);font-size:12px">Not enough snapshots for history chart. Ingest more documents to see trends.</div>'
+      : buildDriftChart(history, report.threshold);
+
+    // Re-index log
+    const events = logData.events || [];
+    const logHTML = events.length === 0
+      ? '<div style="color:var(--muted);font-size:13px">No re-index events yet.</div>'
+      : `<div class="table-wrap"><table>
+          <thead><tr><th>Time</th><th>Trigger</th><th>Before</th><th>After</th><th>Chunks</th><th>Duration</th><th>Status</th></tr></thead>
+          <tbody>${events.map(e => `
+            <tr>
+              <td style="font-size:11px;color:var(--muted);white-space:nowrap">${e.triggered_at.slice(0,19).replace('T',' ')}</td>
+              <td><span class="pill" style="font-size:10px">${e.trigger_reason.replace(/_/g,' ')}</span></td>
+              <td style="color:${e.drift_score_before > report.threshold ? 'var(--danger)' : 'var(--success)'}">${e.drift_score_before.toFixed(4)}</td>
+              <td style="color:${e.drift_score_after > report.threshold ? 'var(--warn)' : 'var(--success)'}">${e.drift_score_after.toFixed(4)}</td>
+              <td style="font-size:12px">${e.chunks_before} → ${e.chunks_after}</td>
+              <td style="font-size:12px">${e.duration_seconds}s</td>
+              <td><span class="badge ${e.status === 'success' ? 'badge-success' : 'badge-danger'}">${e.status}</span></td>
+            </tr>`).join('')}
+          </tbody></table></div>`;
+
+    container.innerHTML = `
+      <!-- Status banner -->
+      <div style="padding:16px 20px;border-radius:8px;background:${sevBg};
+                  border:1px solid ${sevColor}33;margin-bottom:16px;
+                  display:flex;justify-content:space-between;align-items:center">
+        <div>
+          <div style="font-size:16px;font-weight:700;color:${sevColor}">
+            ${report.severity.toUpperCase()} DRIFT
+            ${report.needs_reindex ? '— Re-indexing Recommended' : '— Stable'}
+          </div>
+          <div style="font-size:13px;color:var(--muted);margin-top:4px">${report.recommendation}</div>
+        </div>
+        <div style="text-align:right;font-size:11px;color:var(--muted)">
+          ${report.snapshot_count} snapshots<br>
+          Latest: ${report.latest_snapshot_at.slice(0,19).replace('T',' ')} UTC
+        </div>
+      </div>
+
+      <!-- Stats row -->
+      <div class="grid4" style="margin-bottom:16px">
+        <div class="stat">
+          <div class="stat-val" style="color:${sevColor}">${(signals.composite_score * 100).toFixed(1)}%</div>
+          <div class="stat-label">Composite Score</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val">${report.threshold}</div>
+          <div class="stat-label">Threshold</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val">${signals.n_chunks_after}</div>
+          <div class="stat-label">Current Chunks</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val ${signals.chunks_delta > 0 ? 'stat-success' : signals.chunks_delta < 0 ? 'stat-danger' : ''}">${signals.chunks_delta >= 0 ? '+' : ''}${signals.chunks_delta}</div>
+          <div class="stat-label">Chunks Delta</div>
+        </div>
+      </div>
+
+      <div class="grid2" style="margin-bottom:16px">
+        <!-- Drift signals -->
+        <div class="card">
+          <div class="card-title">Drift Signals</div>
+          ${signalRows}
+          <div style="margin-top:12px;font-size:11px;color:var(--muted);line-height:1.6">
+            Threshold: ${report.threshold} &nbsp;|&nbsp;
+            Centroid 50% + JS-Divergence 35% + Variance 15%
+          </div>
+        </div>
+
+        <!-- Trend chart -->
+        <div class="card">
+          <div class="card-title">Drift Score History</div>
+          ${chartHTML}
+        </div>
+      </div>
+
+      <!-- Re-index log -->
+      <div class="card">
+        <div class="card-title">Re-index Log
+          <span class="pill" style="margin-left:8px;font-size:10px">${logData.total_reindex_events} total</span>
+        </div>
+        ${logHTML}
+      </div>`;
+
+  } catch(e) {
+    container.innerHTML = `<div class="alert alert-error">${e.message}</div>`;
+    reindexBtn.style.display = 'none';
+  }
+}
+
+function buildDriftChart(history, threshold) {
+  if (!history.length) return '';
+  const maxScore = Math.max(...history.map(h => h.composite_score), threshold * 1.5, 0.01);
+  const thresholdPct = Math.min(100, Math.round((threshold / maxScore) * 100));
+
+  const bars = history.slice(-20).map((h, i) => {
+    const pct = Math.min(100, Math.round((h.composite_score / maxScore) * 100));
+    const color = h.composite_score > threshold ? 'var(--danger)' :
+                  h.composite_score > threshold * 0.7 ? 'var(--warn)' : 'var(--success)';
+    const label = h.timestamp.slice(11, 16);
+    const isReindex = h.trigger === 'reindex';
+    return `<div style="display:flex;flex-direction:column;align-items:center;flex:1;gap:3px" title="${h.timestamp.slice(0,19)} | score=${h.composite_score} | chunks=${h.n_chunks}">
+      <div style="font-size:9px;color:var(--muted);writing-mode:vertical-rl;transform:rotate(180deg)">${label}</div>
+      <div style="flex:1;display:flex;align-items:flex-end;width:100%">
+        <div style="width:100%;height:${Math.max(2,pct)}%;background:${color};border-radius:2px 2px 0 0;
+                    ${isReindex ? 'outline:2px solid var(--accent)' : ''}"></div>
+      </div>
+      ${isReindex ? '<div style="font-size:8px;color:var(--accent)">↻</div>' : '<div style="height:12px"></div>'}
+    </div>`;
+  }).join('');
+
+  return `<div style="position:relative">
+    <div style="display:flex;align-items:flex-end;height:120px;gap:2px;border-bottom:1px solid var(--border);position:relative;padding-bottom:4px">
+      <div style="position:absolute;bottom:${thresholdPct}%;left:0;right:0;
+                  border-top:1px dashed var(--warn);pointer-events:none">
+        <span style="font-size:9px;color:var(--warn);background:var(--surface);padding:0 3px">threshold</span>
+      </div>
+      ${bars}
+    </div>
+    <div style="font-size:10px;color:var(--muted);margin-top:6px">
+      Last ${Math.min(20, history.length)} snapshots &nbsp;|&nbsp;
+      ↻ = re-index event &nbsp;|&nbsp;
+      <span style="color:var(--success)">■</span> stable
+      <span style="color:var(--warn)">■</span> warning
+      <span style="color:var(--danger)">■</span> exceeds threshold
+    </div>
+  </div>`;
+}
+
+async function triggerReindex() {
+  const client = document.getElementById('driftClient').value;
+  if (!client) return;
+  if (!confirm(`Trigger manual re-indexing for "${client}"? This re-embeds all chunks and may take a few minutes.`)) return;
+
+  const btn = document.getElementById('reindexBtn');
+  btn.innerHTML = '<span class="spinner"></span> Re-indexing...';
+  btn.disabled = true;
+
+  try {
+    const result = await api(`/eval/drift/${client}/reindex`, 'POST');
+    const statusColor = result.status === 'success' ? 'var(--success)' : 'var(--danger)';
+    alert(
+      `Re-index ${result.status.toUpperCase()}\n` +
+      `Duration: ${result.duration_seconds}s\n` +
+      `Chunks: ${result.chunks_before} → ${result.chunks_after}\n` +
+      `Drift: ${result.drift_score_before} → ${result.drift_score_after}` +
+      (result.error ? `\nError: ${result.error}` : '')
+    );
+    loadDriftReport();
+  } catch(e) {
+    alert(`Re-index failed: ${e.message}`);
+  }
+  btn.textContent = '⟳ Re-index Now';
+  btn.disabled = false;
+}
+
 function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }

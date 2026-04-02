@@ -167,6 +167,132 @@ def analyze_hallucinations(client_id: str) -> dict:
             "message": "No hallucination data yet. Run some queries first.",
         }
     
+#     @router.get("/drift/{client_id}/report")
+# def get_drift_report(client_id: str) -> dict:
+#     """Full drift analysis report with all three signals and history."""
+#     if not manager.exists(client_id):
+#         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+#     from app.evaluation.drift_detector import check_drift
+#     report = check_drift(client_id)
+#     return {
+#         "client_id": report.client_id,
+#         "needs_reindex": report.needs_reindex,
+#         "severity": report.severity,
+#         "threshold": report.threshold,
+#         "snapshot_count": report.snapshot_count,
+#         "latest_snapshot_at": report.latest_snapshot_at,
+#         "recommendation": report.recommendation,
+#         "signals": {
+#             "centroid_similarity": report.signals.centroid_similarity,
+#             "centroid_drift": report.signals.centroid_drift,
+#             "variance_drift": report.signals.variance_drift,
+#             "js_divergence": report.signals.js_divergence,
+#             "composite_score": report.signals.composite_score,
+#             "n_chunks_before": report.signals.n_chunks_before,
+#             "n_chunks_after": report.signals.n_chunks_after,
+#             "chunks_delta": report.signals.chunks_delta,
+#         },
+#         "history": report.history,
+#     }
+
+
+# @router.post("/drift/{client_id}/reindex")
+# def manual_reindex(client_id: str) -> dict:
+#     """Manually trigger re-indexing for a client."""
+#     if not manager.exists(client_id):
+#         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+#     from app.evaluation.drift_detector import trigger_reindex
+#     event = trigger_reindex(client_id, trigger_reason="manual")
+#     return {
+#         "event_id": event.event_id,
+#         "client_id": event.client_id,
+#         "status": event.status,
+#         "trigger_reason": event.trigger_reason,
+#         "drift_score_before": event.drift_score_before,
+#         "drift_score_after": event.drift_score_after,
+#         "chunks_before": event.chunks_before,
+#         "chunks_after": event.chunks_after,
+#         "duration_seconds": event.duration_seconds,
+#         "error": event.error,
+#     }
+
+
+# @router.get("/drift/{client_id}/reindex-log")
+# def get_reindex_log(client_id: str) -> dict:
+#     """Return all re-index events for a client."""
+#     if not manager.exists(client_id):
+#         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+#     from app.evaluation.drift_detector import get_reindex_log
+#     events = get_reindex_log(client_id)
+#     return {
+#         "client_id": client_id,
+#         "total_reindex_events": len(events),
+#         "events": [e.to_dict() for e in reversed(events)],  # newest first
+#     }
+
+@router.get("/drift/{client_id}/report")
+def get_drift_report(client_id: str) -> dict:
+    """Full drift analysis report with all three signals and history."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    from app.evaluation.drift_detector import check_drift
+    report = check_drift(client_id)
+    return {
+        "client_id": report.client_id,
+        "needs_reindex": report.needs_reindex,
+        "severity": report.severity,
+        "threshold": report.threshold,
+        "snapshot_count": report.snapshot_count,
+        "latest_snapshot_at": report.latest_snapshot_at,
+        "recommendation": report.recommendation,
+        "signals": {
+            "centroid_similarity": report.signals.centroid_similarity,
+            "centroid_drift": report.signals.centroid_drift,
+            "variance_drift": report.signals.variance_drift,
+            "js_divergence": report.signals.js_divergence,
+            "composite_score": report.signals.composite_score,
+            "n_chunks_before": report.signals.n_chunks_before,
+            "n_chunks_after": report.signals.n_chunks_after,
+            "chunks_delta": report.signals.chunks_delta,
+        },
+        "history": report.history,
+    }
+
+
+@router.post("/drift/{client_id}/reindex")
+def manual_reindex(client_id: str) -> dict:
+    """Manually trigger re-indexing for a client."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    from app.evaluation.drift_detector import trigger_reindex
+    event = trigger_reindex(client_id, trigger_reason="manual")
+    return {
+        "event_id": event.event_id,
+        "client_id": event.client_id,
+        "status": event.status,
+        "trigger_reason": event.trigger_reason,
+        "drift_score_before": event.drift_score_before,
+        "drift_score_after": event.drift_score_after,
+        "chunks_before": event.chunks_before,
+        "chunks_after": event.chunks_after,
+        "duration_seconds": event.duration_seconds,
+        "error": event.error,
+    }
+
+
+@router.get("/drift/{client_id}/reindex-log")
+def get_reindex_log(client_id: str) -> dict:
+    """Return all re-index events for a client."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    from app.evaluation.drift_detector import get_reindex_log
+    events = get_reindex_log(client_id)
+    return {
+        "client_id": client_id,
+        "total_reindex_events": len(events),
+        "events": [e.to_dict() for e in reversed(events)],  # newest first
+    }
+
 ## The complete picture
 """
 User Query

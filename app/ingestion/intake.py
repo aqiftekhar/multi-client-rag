@@ -133,13 +133,34 @@ def ingest_document(
     collection.upsert(ids=ids, documents=docs, metadatas=metadatas, embeddings=vecs)
 
     # Update BM25 index with raw texts (no headers)
-    # Must happen after ChromaDB upsert so data is consistent
     from app.rag.bm25_index import update_index
     update_index(
         client_id=client_id,
         chunk_ids=ids,
         raw_texts=[c.text for c in unique_chunks],
     )
+
+    # Record drift snapshot — fetch ALL current embeddings from ChromaDB
+    # so the snapshot reflects the complete distribution, not just this batch.
+    # This is the correct approach: drift is a property of the whole corpus.
+    try:
+        from app.evaluation.drift_detector import record_snapshot, check_drift
+        full_result = collection.get(include=["embeddings"])
+        all_embeddings = full_result.get("embeddings", [])
+        if all_embeddings:
+            record_snapshot(client_id, all_embeddings, trigger="ingestion")
+            # Check drift immediately after snapshot — log warning if threshold exceeded
+            report = check_drift(client_id)
+            if report.needs_reindex:
+                logger.warning(
+                    "POST-INGEST DRIFT ALERT — client='%s' composite=%.4f severity=%s | %s",
+                    client_id,
+                    report.signals.composite_score,
+                    report.severity,
+                    report.recommendation,
+                )
+    except Exception as exc:
+        logger.warning("Drift snapshot failed (non-fatal): %s", exc)
 
     logger.info(
         "Ingested doc '%s' for client '%s': %d stored, %d dupes, %d anomalous.",

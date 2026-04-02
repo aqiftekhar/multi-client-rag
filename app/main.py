@@ -28,8 +28,19 @@ async def lifespan(app: FastAPI):
     # Restore client registry from disk first
     from app.clients.manager import load_from_disk
     load_from_disk()
-    from app.clients.manager import load_from_disk
+    
+    from app.clients.manager import load_from_disk, list_clients
     load_from_disk()
+
+    # Load persisted drift snapshots and re-index logs for all clients
+    from app.evaluation.drift_detector import (
+        load_all_from_disk as load_drift_data,
+        start_background_monitor,
+    )
+    load_drift_data([c.client_id for c in list_clients()])
+
+    # Start background drift monitor (checks every 30 minutes)
+    start_background_monitor(check_interval_minutes=30)
 
     # Rebuild BM25 indexes from ChromaDB for all registered clients
     # This ensures hybrid search works after app restart without re-ingesting
@@ -49,6 +60,8 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Embedding warmup failed (non-fatal): %s", exc)
     yield
+    from app.evaluation.drift_detector import stop_background_monitor
+    stop_background_monitor()
     logger.info("Multi Tenant RAG shutting down.")
 
 
