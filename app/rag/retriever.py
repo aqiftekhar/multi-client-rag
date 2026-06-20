@@ -28,6 +28,7 @@ from app.config import get_settings
 from app.db.chroma_client import get_or_create_collection
 from app.rag.embedder import embed_query
 from app.rag.bm25_index import get_index as get_bm25_index
+from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -179,13 +180,14 @@ def retrieve(
     client_id: str,
     coarse_k: int | None = None,
     fine_k: int | None = None,
+    use_hyde: bool = False,
+    ollama_host: str | None = None,
+    ollama_model: str | None = None,
 ) -> list[RetrievedChunk]:
     """Hybrid retrieval: Dense + BM25 → RRF → Cross-encoder reranking.
 
-    Stage 1A — Dense retrieval from ChromaDB (top coarse_k)
-    Stage 1B — BM25 keyword retrieval (top coarse_k)
-    Stage 2  — RRF merges both lists into single ranked pool
-    Stage 3  — Cross-encoder reranks merged pool, returns top fine_k
+    use_hyde: if True, embed a hypothetical answer instead of the raw query
+              for the dense retrieval stage. BM25 still uses the raw query.
     """
     cfg = get_settings()
     coarse_k = coarse_k or cfg.coarse_k
@@ -200,7 +202,18 @@ def retrieve(
     actual_k = min(coarse_k, n_docs)
 
     # ── Stage 1A: Dense retrieval ─────────────────────────────────────────────
-    query_vec = embed_query(query)
+    # Use HyDE embedding if requested, fall back to raw query embedding
+    if use_hyde and ollama_host and ollama_model:
+        from app.rag.hyde import get_hyde_embedding
+        query_vec = get_hyde_embedding(query, ollama_host, ollama_model)
+        if query_vec is None:
+            logger.info("HyDE fallback to raw query embedding (run_id not available here)")
+            query_vec = embed_query(query)
+        else:
+            logger.info("HyDE embedding used for dense retrieval")
+    else:
+        query_vec = embed_query(query)
+        
     dense_result = collection.query(
         query_embeddings=[query_vec],
         n_results=actual_k,

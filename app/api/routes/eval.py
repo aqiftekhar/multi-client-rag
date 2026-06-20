@@ -73,16 +73,15 @@ def get_drift(client_id: str) -> DriftReportResponse:
     if not manager.exists(client_id):
         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
     report = check_drift(client_id)
-    history = get_drift_history(client_id)
     return DriftReportResponse(
         client_id=report.client_id,
-        current_similarity=report.current_similarity,
-        drift_score=report.drift_score,
+        current_similarity=report.signals.centroid_similarity,
+        drift_score=report.signals.composite_score,
         threshold=report.threshold,
         needs_reindex=report.needs_reindex,
         snapshot_count=report.snapshot_count,
         latest_snapshot_at=report.latest_snapshot_at,
-        history=history,
+        history=report.history,
     )
 
 
@@ -292,6 +291,26 @@ def get_reindex_log(client_id: str) -> dict:
         "total_reindex_events": len(events),
         "events": [e.to_dict() for e in reversed(events)],  # newest first
     }
+
+@router.get("/cache/{client_id}")
+def get_cache_stats(client_id: str) -> dict:
+    """Return semantic cache performance statistics."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    from app.rag.semantic_cache import get_stats, get_all_entries
+    stats = get_stats(client_id)
+    stats["entries"] = get_all_entries(client_id)
+    return stats
+
+
+@router.delete("/cache/{client_id}")
+def clear_cache(client_id: str) -> dict:
+    """Clear semantic cache for a client."""
+    if not manager.exists(client_id):
+        raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
+    from app.rag.semantic_cache import invalidate_client
+    removed = invalidate_client(client_id)
+    return {"client_id": client_id, "entries_removed": removed}
 
 ## The complete picture
 """

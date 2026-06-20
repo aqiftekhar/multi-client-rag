@@ -7,6 +7,7 @@ from app.clients import manager
 from app.db.chroma_client import delete_collection
 from app.ingestion.intake import ingest_document
 import logging
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
@@ -49,49 +50,42 @@ def _extract_pdf_text(pdf_bytes: bytes, filename: str) -> str:
 
     all_pages: list[str] = []
     MIN_TEXT_CHARS = 30
-    MIN_IMAGE_SIZE = 100  # skip tiny images (icons, bullets)
+    MIN_IMAGE_SIZE = 100
 
     for page_num in range(len(doc)):
         page = doc[page_num]
         page_label = f"[Page {page_num + 1}]"
         page_parts: list[str] = []
 
-        # ── 1. Direct text extraction ─────────────────────────────────────────
+        # 1. Direct text extraction
         direct_text = page.get_text("text").strip()
         if direct_text:
             page_parts.append(direct_text)
 
-        # ── 2. Table extraction ───────────────────────────────────────────────
-        # PyMuPDF 1.23+ has find_tables()
+        # 2. Table extraction
         try:
             tables = page.find_tables()
             for table_index, table in enumerate(tables, 1):
                 rows = table.extract()
                 if not rows:
                     continue
-
-                # Convert table rows to readable plain text
                 table_lines = [f"[Table {table_index}]"]
                 for row in rows:
-                    # Clean None values and strip whitespace
                     cleaned = [str(cell).strip() if cell is not None else "" for cell in row]
                     table_lines.append(" | ".join(cleaned))
-
                 table_text = "\n".join(table_lines)
-                # Only add if table has actual content
                 if any(cell for row in rows for cell in row if cell):
                     page_parts.append(table_text)
                     logger.debug(
                         "Page %d: extracted table %d (%d rows)",
-                        page_num + 1, table_index, len(rows)
+                        page_num + 1, table_index, len(rows),
                     )
         except AttributeError:
-            # find_tables() not available in older PyMuPDF versions
             logger.debug("Table extraction not available — upgrade pymupdf if needed.")
         except Exception as exc:
             logger.warning("Table extraction failed on page %d: %s", page_num + 1, exc)
 
-        # ── 3. Image extraction + OCR ─────────────────────────────────────────
+        # 3. Image extraction + OCR
         if ocr_available:
             image_list = page.get_images(full=True)
             for img_ref in image_list:
@@ -101,39 +95,37 @@ def _extract_pdf_text(pdf_bytes: bytes, filename: str) -> str:
                     image_bytes = base_image["image"]
                     pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
                     w, h = pil_image.size
-
-                    # Skip tiny images — they're likely icons or decorations
                     if w < MIN_IMAGE_SIZE or h < MIN_IMAGE_SIZE:
                         continue
-
                     ocr_text = pytesseract.image_to_string(pil_image, lang="eng").strip()
                     if ocr_text and len(ocr_text) > 20:
                         page_parts.append(f"[Image Text]\n{ocr_text}")
                         logger.debug(
                             "Page %d: OCR'd image %dx%d → %d chars",
-                            page_num + 1, w, h, len(ocr_text)
+                            page_num + 1, w, h, len(ocr_text),
                         )
                 except Exception as exc:
                     logger.warning("Image OCR failed on page %d: %s", page_num + 1, exc)
 
-        # ── 4. Scanned page fallback — OCR the entire rendered page ──────────
-        # Triggered when: no direct text AND no embedded images extracted text
+        # 4. Scanned page fallback
         if ocr_available and len(direct_text) < MIN_TEXT_CHARS and not page.get_images():
             try:
-                # Render page at 2x zoom for better OCR accuracy (~144 DPI)
                 mat = fitz.Matrix(2.0, 2.0)
                 pix = page.get_pixmap(matrix=mat, alpha=False)
                 pil_page = Image.open(io.BytesIO(pix.tobytes("png"))).convert("RGB")
                 ocr_text = pytesseract.image_to_string(pil_page, lang="eng").strip()
                 if ocr_text:
                     page_parts.append(f"[Scanned Page OCR]\n{ocr_text}")
-                    logger.info("Page %d: full-page OCR returned %d chars", page_num + 1, len(ocr_text))
+                    logger.info(
+                        "Page %d: full-page OCR returned %d chars", page_num + 1, len(ocr_text)
+                    )
                 else:
-                    logger.warning("Page %d: OCR returned nothing — image may be too low quality", page_num + 1)
+                    logger.warning(
+                        "Page %d: OCR returned nothing — image may be too low quality", page_num + 1
+                    )
             except Exception as exc:
                 logger.warning("Full-page OCR failed on page %d: %s", page_num + 1, exc)
 
-        # ── Combine page parts ────────────────────────────────────────────────
         if page_parts:
             all_pages.append(f"{page_label}\n" + "\n\n".join(page_parts))
 
@@ -153,7 +145,7 @@ def _extract_pdf_text(pdf_bytes: bytes, filename: str) -> str:
 
     logger.info(
         "PDF extraction complete: %d pages, %d total chars",
-        len(all_pages), len(full_text)
+        len(all_pages), len(full_text),
     )
     return full_text
 
@@ -175,6 +167,13 @@ def ingest(req: IngestRequest) -> IngestResponse:
         extra_metadata=req.extra_metadata,
     )
 
+    # Invalidate semantic cache — new documents may change correct answers
+    try:
+        from app.rag.semantic_cache import invalidate_client
+        invalidate_client(req.client_id)
+    except Exception as exc:
+        logger.warning("Cache invalidation failed (non-fatal): %s", exc)
+
     return IngestResponse(
         doc_id=result.doc_id,
         client_id=result.client_id,
@@ -184,6 +183,7 @@ def ingest(req: IngestRequest) -> IngestResponse:
         anomalous_chunks=result.anomalous_chunks,
         errors=result.errors,
     )
+
 
 @router.get("/{client_id}/documents")
 def list_documents(client_id: str) -> dict:
@@ -200,7 +200,6 @@ def list_documents(client_id: str) -> dict:
         result = collection.get(include=["metadatas"])
         metadatas = result["metadatas"]
 
-        # Group chunks by doc_id
         docs: dict[str, dict] = {}
         for meta in metadatas:
             doc_id = meta.get("doc_id", "unknown")
@@ -243,6 +242,13 @@ def delete_document(client_id: str, doc_id: str) -> dict:
         chunk_count = len(result["ids"])
         collection.delete(ids=result["ids"])
 
+        # Invalidate cache when a document is deleted
+        try:
+            from app.rag.semantic_cache import invalidate_client
+            invalidate_client(client_id)
+        except Exception as exc:
+            logger.warning("Cache invalidation failed (non-fatal): %s", exc)
+
         logger.info(
             "Deleted doc '%s' for client '%s': %d chunks removed.",
             doc_id, client_id, chunk_count,
@@ -256,16 +262,14 @@ def delete_document(client_id: str, doc_id: str) -> dict:
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    
+
+
 @router.post("/pdf", response_model=IngestResponse)
 async def ingest_pdf(
     client_id: str = Form(...),
     file: UploadFile = File(...),
 ) -> IngestResponse:
-    """Ingest a PDF file for a registered client.
-
-    Extracts text from all pages and runs through the full ingestion pipeline.
-    """
+    """Ingest a PDF file for a registered client."""
     if not manager.exists(client_id):
         raise HTTPException(
             status_code=404,
@@ -295,6 +299,13 @@ async def ingest_pdf(
         extra_metadata={"file_type": "pdf", "original_filename": file.filename},
     )
 
+    # Invalidate semantic cache — new documents may change correct answers
+    try:
+        from app.rag.semantic_cache import invalidate_client
+        invalidate_client(client_id)
+    except Exception as exc:
+        logger.warning("Cache invalidation failed (non-fatal): %s", exc)
+
     return IngestResponse(
         doc_id=result.doc_id,
         client_id=result.client_id,
@@ -312,4 +323,12 @@ def clear_corpus(client_id: str) -> dict:
     if not manager.exists(client_id):
         raise HTTPException(status_code=404, detail=f"Client '{client_id}' not found.")
     delete_collection(client_id)
+
+    # Invalidate cache when entire corpus is cleared
+    try:
+        from app.rag.semantic_cache import invalidate_client
+        invalidate_client(client_id)
+    except Exception as exc:
+        logger.warning("Cache invalidation failed (non-fatal): %s", exc)
+
     return {"cleared": client_id}

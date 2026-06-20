@@ -97,7 +97,7 @@ def _eval_client(client_id: str, queries: list[EvalQuery], k: int = 5) -> Client
 
     if drift_report.needs_reindex:
         failure_reasons.append(
-            f"embedding_drift={drift_report.drift_score:.4f} > threshold {drift_report.threshold}"
+            f"embedding_drift={drift_report.signals.composite_score:.4f} > threshold {drift_report.threshold}"
         )
         # Drift is a warning — doesn't block deploy on its own
         # passed = False  # uncomment to make drift a hard failure
@@ -107,14 +107,14 @@ def _eval_client(client_id: str, queries: list[EvalQuery], k: int = 5) -> Client
         client_id,
         passed,
         avg_metrics,
-        drift_report.drift_score,
+        drift_report.signals.composite_score,
     )
 
     return ClientEvalResult(
         client_id=client_id,
         num_queries=len(queries),
         metrics=avg_metrics,
-        drift_score=drift_report.drift_score,
+        drift_score=drift_report.signals.composite_score,
         signal_summary=sig_summary,
         passed=passed,
         failure_reasons=failure_reasons,

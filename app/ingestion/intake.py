@@ -140,16 +140,23 @@ def ingest_document(
         raw_texts=[c.text for c in unique_chunks],
     )
 
-    # Record drift snapshot — fetch ALL current embeddings from ChromaDB
-    # so the snapshot reflects the complete distribution, not just this batch.
-    # This is the correct approach: drift is a property of the whole corpus.
+    # Record drift snapshot — sample up to 2000 embeddings
+    # Sampling is statistically sufficient for drift detection
+    # and avoids fetching the entire corpus on every ingest
     try:
         from app.evaluation.drift_detector import record_snapshot, check_drift
-        full_result = collection.get(include=["embeddings"])
+        SAMPLE_LIMIT = 2000
+        total_in_collection = collection.count()
+        if total_in_collection <= SAMPLE_LIMIT:
+            full_result = collection.get(include=["embeddings"])
+        else:
+            full_result = collection.get(
+                include=["embeddings"],
+                limit=SAMPLE_LIMIT,
+            )
         all_embeddings = full_result.get("embeddings", [])
         if all_embeddings:
             record_snapshot(client_id, all_embeddings, trigger="ingestion")
-            # Check drift immediately after snapshot — log warning if threshold exceeded
             report = check_drift(client_id)
             if report.needs_reindex:
                 logger.warning(

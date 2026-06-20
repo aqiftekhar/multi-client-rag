@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.api.routes import clients, ingest, query, eval as eval_route
+from app.middleware.auth import AuthRateLimitMiddleware
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -23,46 +24,49 @@ logger = logging.getLogger(__name__)
 # ── Lifespan ───────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Multi Tenant RAG starting up...")
+    logger.info("SkyHi RAG starting up...")
 
-    # Restore client registry from disk first
-    from app.clients.manager import load_from_disk
-    load_from_disk()
-    
+    # 1. Restore client registry
     from app.clients.manager import load_from_disk, list_clients
     load_from_disk()
 
-    # Load persisted drift snapshots and re-index logs for all clients
+    # 2. Load persisted signals
+    from app.evaluation.signals import load_signals_from_disk
+    load_signals_from_disk()
+
+    # 3. Load semantic cache
+    from app.rag.semantic_cache import load_cache_from_disk
+    load_cache_from_disk([c.client_id for c in list_clients()])
+
+    # 4. Load drift snapshots and re-index logs
     from app.evaluation.drift_detector import (
         load_all_from_disk as load_drift_data,
         start_background_monitor,
     )
     load_drift_data([c.client_id for c in list_clients()])
 
-    # Start background drift monitor (checks every 30 minutes)
-    start_background_monitor(check_interval_minutes=30)
-
-    # Rebuild BM25 indexes from ChromaDB for all registered clients
-    # This ensures hybrid search works after app restart without re-ingesting
+    # 5. Rebuild BM25 indexes from ChromaDB
     from app.rag.bm25_index import rebuild_from_chromadb
-    from app.clients.manager import list_clients
     for client_cfg in list_clients():
         rebuild_from_chromadb(client_cfg.client_id)
 
-    from app.evaluation.hallucination_log import load_from_disk as load_hallucination_log
-    load_hallucination_log()
+    # 6. Start background drift monitor (every 30 minutes)
+    start_background_monitor(check_interval_minutes=30)
 
-    # Warm up embedding model on startup so first query is fast
+    # 7. Warm up embedding model
     try:
         from app.rag.embedder import embed_query
         embed_query("warmup")
         logger.info("Embedding model warmed up.")
     except Exception as exc:
         logger.warning("Embedding warmup failed (non-fatal): %s", exc)
+
     yield
+
+    # Shutdown
     from app.evaluation.drift_detector import stop_background_monitor
     stop_background_monitor()
-    logger.info("Multi Tenant RAG shutting down.")
+    logger.info("SkyHi RAG shutting down.")
 
 
 # ── App ────────────────────────────────────────────────────────────────────────
@@ -76,6 +80,10 @@ def create_app() -> FastAPI:
         version="1.0.0",
         lifespan=lifespan,
     )
+
+    # Middleware must be registered here in create_app — NOT inside lifespan
+    # Starlette raises RuntimeError if add_middleware is called after startup
+    app.add_middleware(AuthRateLimitMiddleware)
 
     app.add_middleware(
         CORSMiddleware,

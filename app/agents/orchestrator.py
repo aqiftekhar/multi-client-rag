@@ -1,6 +1,7 @@
 """Orchestrator — coordinates the multi-agent RAG pipeline using Ollama as LLM."""
 
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -11,6 +12,8 @@ from app.agents.retrieval_agent import RetrievalAgent
 from app.agents.validation_agent import ValidationAgent
 from app.agents.correction_agent import CorrectionAgent
 from app.agents.evaluation_agent import EvaluationAgent
+from app.rag.semantic_cache import get as cache_get, put as cache_put
+from app.rag.embedder import embed_query as _embed_query
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -148,7 +151,10 @@ class Orchestrator:
         cfg = get_settings()
         self._ollama_host = cfg.ollama_host.rstrip("/")
         self._model = cfg.ollama_model
+        self._gate_slow_count = 0   # ← this line was missing
         self._check_ollama()
+        from app.agents.decomposition_agent import QueryDecompositionAgent
+        self.decomposition_agent = QueryDecompositionAgent()
 
     def _check_ollama(self) -> None:
         """Warn on startup if Ollama is unreachable or model is missing."""
@@ -187,6 +193,19 @@ class Orchestrator:
             query,
         )
 
+        # ── Semantic cache check ──────────────────────────────────────────────
+        # Check cache before running the full pipeline.
+        # Cache hit returns instantly — skips retrieval, LLM, and evaluation.
+        query_embedding = _embed_query(query)
+        cached = cache_get(query_embedding, client_id)
+        if cached:
+            logger.info(
+                "Cache HIT — run='%s' similarity=%.4f",
+                run_id, cached.get("cache_similarity", 0),
+            )
+            cached["run_id"] = run_id
+            return cached
+
         while True:
             # ── Step 1: Retrieve ──────────────────────────────────────────────
             retrieval_result = self.retrieval_agent.run(context)
@@ -199,6 +218,16 @@ class Orchestrator:
                 if not correction_result.should_retry:
                     break
                 continue
+
+            # ── Step 1.5: Query decomposition ─────────────────────────────────
+            # Only runs if query looks complex (AND/OR/compare indicators).
+            # Decomposition retrieves for each sub-query then merges context.
+            # This is a no-op for simple queries — heuristic check is fast.
+            decomp_result = self.decomposition_agent.run(context)
+            context = decomp_result.updated_context
+            # If decomposition happened, retrieved_chunks and context_string
+            # are already updated — skip the answerability gate recheck
+            # and proceed directly to LLM call
 
             # ── Step 2: Hard answerability gate ───────────────────────────────
             # If the context cannot answer the question, skip generation entirely.
@@ -292,7 +321,9 @@ class Orchestrator:
             context.retry_count,
         )
 
-        return {
+        # ── Store result in cache ─────────────────────────────────────────────
+        # Only cache if not a NOT FOUND and confidence is sufficient
+        result = {
             "run_id": run_id,
             "query": query,
             "answer": context.final_answer or "Unable to generate a reliable answer.",
@@ -301,20 +332,27 @@ class Orchestrator:
             "chunks_used": len(context.pruned_chunks),
             "retry_count": context.retry_count,
             "errors": context.errors,
+            "cache_hit": False,
         }
+        cache_put(query, query_embedding, result, client_id)
+        return result
 
     def _check_answerability(self, context: AgentContext) -> tuple[bool, str]:
-        """Hard answerability gate — returns YES or NO only.
+        """Hard answerability gate with circuit breaker.
 
-        If NO: skip generation entirely, return NOT FOUND immediately.
-        Only retries if YES but generation fails — never retries a NO.
-
-        Less conservative than previous version:
-        - Specific factual queries (numbers, names, techniques) default to YES
-        - When in doubt, return YES and let the LLM + evaluator handle it
+        Circuit breaker: if the gate LLM call is consistently slow (>15s),
+        skip it and proceed to generation — better a slow answer than none.
         """
         if not context.context_string.strip():
             return False, "no_context_retrieved"
+
+        # Circuit breaker — if gate is slow 3+ times in a row, skip it
+        if self._gate_slow_count >= 3:
+            logger.warning(
+                "Answerability gate circuit breaker OPEN — skipping (run='%s')",
+                context.run_id,
+            )
+            return True, "circuit_breaker_open"
 
         prompt = f"""You are an answerability classifier.
 
@@ -330,17 +368,18 @@ FIRST: Is this actually a question or just an instruction?
 Rules for real questions:
 1. Return YES if the context contains explicit information that directly answers the question
 2. Return YES if the document explicitly denies the question's premise — that denial IS the answer
-3. Return YES for value-judgment questions like "what is the best X" or "what is the most important Y" — if the document states which X was used or chosen, that IS the answer even without explicit comparison
+3. Return YES for value-judgment questions like "what is the best X" — if the document states which X was used or chosen, that IS the answer
 4. Return NO only if the topic is completely absent from the context
 5. Return NO if context only mentions the subject as an analogy or mathematical comparison
 6. Analogy is NOT implementation: "can be seen as X" does NOT mean "uses X"
-7. For specific factual questions (numbers, names, dates, named techniques): return YES if the fact appears anywhere in the context, even briefly
+7. For specific factual questions (numbers, names, dates, techniques): return YES if the fact appears anywhere in context
 8. For multi-part questions using AND: return YES if context addresses ANY part
-9. When in doubt, return YES — it is better to let the LLM answer and validate than to block
+9. When in doubt, return YES
 
 Answer with ONLY this JSON, nothing else:
 {{"answerable": "YES" or "NO", "reason": "<one sentence>"}}"""
 
+        start = time.time()
         try:
             import re, json
             payload = {
@@ -358,21 +397,33 @@ Answer with ONLY this JSON, nothing else:
             raw = response.json()["message"]["content"].strip()
             raw = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
             match = re.search(r"\{.*?\}", raw, re.DOTALL)
+
+            elapsed = time.time() - start
+            if elapsed > 15:
+                self._gate_slow_count += 1
+                logger.warning(
+                    "Answerability gate slow: %.1fs (count=%d)",
+                    elapsed, self._gate_slow_count,
+                )
+            else:
+                self._gate_slow_count = max(0, self._gate_slow_count - 1)
+
             if match:
                 result = json.loads(match.group(0))
                 is_yes = str(result.get("answerable", "YES")).strip().upper() == "YES"
                 reason = result.get("reason", "")
                 logger.info(
                     "Answerability gate — run='%s' answerable=%s reason=%s",
-                    context.run_id,
-                    is_yes,
-                    reason,
+                    context.run_id, is_yes, reason,
                 )
                 return is_yes, reason
+
         except Exception as exc:
+            elapsed = time.time() - start
+            if elapsed > 15:
+                self._gate_slow_count += 1
             logger.warning("Answerability check failed (fail open): %s", exc)
 
-        # Fail open — if the check itself errors, allow generation
         return True, "check_error_proceeding"
 
     def _call_llm(self, context: AgentContext) -> AgentContext:
